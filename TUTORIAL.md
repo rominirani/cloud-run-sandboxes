@@ -43,12 +43,11 @@ Until recently, engineering teams faced an uncomfortable trade-off: spin up dedi
 **Google Cloud Run Sandboxes (Public Preview)** introduce native, sub-second, micro-isolated execution boundaries **directly inside your existing second-generation Cloud Run container instances**. By leveraging a lightweight virtualization boundary, Cloud Run enables host applications to spawn sealed sandboxes in milliseconds, sharing the container's allocated CPU and RAM with zero additional infrastructure costs.
 
 ```mermaid
-timeline
-    title The Evolution of Compute Isolation
-    Bare Metal Servers : Physical separation : Hours to provision
-    Virtual Machines : Hypervisor isolation : Minutes to boot
-    Containers : Namespace & cgroup isolation : Seconds to start
-    Cloud Run Sandboxes : In-container ephemeral micro-sandboxing : Milliseconds to launch
+flowchart LR
+    A["<b>1. Bare Metal</b><br/>Physical Isolation<br/><i>Hours to provision</i>"] --> 
+    B["<b>2. Virtual Machines</b><br/>Hypervisor Isolation<br/><i>Minutes to boot</i>"] --> 
+    C["<b>3. Containers</b><br/>Namespace Isolation<br/><i>Seconds to start</i>"] --> 
+    D["<b>4. Cloud Run Sandboxes</b><br/>In-Container Isolation<br/><i>Milliseconds to launch</i>"]
 ```
 
 ---
@@ -77,27 +76,28 @@ Why is this fatal in production?
 Cloud Run Sandboxes solve this through a **Zero-Trust by Default** architecture built around three non-negotiable boundaries:
 
 ```mermaid
-graph TD
+flowchart TB
     subgraph HostContainer ["Cloud Run Host Container (Second Generation)"]
-        HostApp["Host Application (FastAPI / Express / Agent)"]
-        HostEnv["Host Env Vars & Secrets (API Keys, DB Passwords)"]
-        GCPMeta["Google Cloud Metadata Server (169.254.169.254)"]
-        
-        subgraph SandboxBoundary ["Cloud Run Sandbox Boundary"]
+        direction TB
+        HostApp["Host Application<br/><i>(FastAPI / Agent Harness)</i>"]
+        HostEnv["Host Environment Variables<br/><i>(Secrets, API Keys, DB Passwords)</i>"]
+        GCPMeta["Google Cloud Metadata Server<br/><code>169.254.169.254</code>"]
+
+        subgraph SandboxBoundary ["Isolated Sandbox Boundary"]
             direction TB
-            SandboxProc["Untrusted Process (/usr/bin/python3, /bin/bash)"]
-            TmpfsOverlay["Volatile Overlay /tmp (Optional with --write)"]
+            SandboxProc["Untrusted Process<br/><code>/usr/bin/python3</code>"]
+            TmpfsOverlay["Volatile Overlay /tmp<br/><i>(Active with --write)</i>"]
         end
     end
-    
+
     PublicInternet["Public Internet / External APIs"]
 
-    HostApp -->|"sandbox do / sandbox run"| SandboxProc
-    SandboxProc -.->|"❌ BLOCKED (No Token Access)"| GCPMeta
-    SandboxProc -.->|"❌ BLOCKED (Hidden by Default)"| HostEnv
-    SandboxProc -.->|"❌ BLOCKED by Default (Deny Egress)"| PublicInternet
-    SandboxProc -->|"Allowed only with --allow-egress"| PublicInternet
-    SandboxProc -.->|"❌ BLOCKED (Read-Only Root File System)"| HostContainer
+    HostApp -->|"Spawns (sandbox do)"| SandboxProc
+    SandboxProc -.->|"❌ Blocked: Token Access"| GCPMeta
+    SandboxProc -.->|"❌ Blocked: Invisible Env"| HostEnv
+    SandboxProc -.->|"❌ Blocked: Read-Only Root"| HostContainer
+    SandboxProc -.->|"❌ Blocked: Deny Egress (Default)"| PublicInternet
+    SandboxProc -->|"✅ Allowed: with --allow-egress"| PublicInternet
 ```
 
 1. **Credential & Environment Isolation**:
@@ -239,34 +239,42 @@ When `--sandbox-launcher` is enabled, Cloud Run automatically mounts an optimize
 ### Lifecycle Modes & Mount Topologies
 
 ```mermaid
-stateDiagram-v2
-    direction TB
-    [*] --> OneShot : sandbox do -- <cmd>
-    OneShot --> InitializeSandbox : Allocates CPU/RAM slice
-    InitializeSandbox --> RunCommand : Executes process
-    RunCommand --> DestroySandbox : Process terminates
-    DestroySandbox --> [*] : Ephemeral overlay destroyed
+flowchart TB
+    subgraph ModeA ["Mode 1: One-Shot Execution (sandbox do)"]
+        direction LR
+        A1["1. Host Runs<br/><code>sandbox do -- &lt;cmd&gt;</code>"] --> A2["2. Instant Spawn<br/><i>(&lt;200ms)</i>"] --> A3["3. Command Executes<br/><i>Isolated Kernel</i>"] --> A4["4. Auto-Destroy<br/><i>Overlay Discarded</i>"]
+    end
 
-    [*] --> DetachedMode : sandbox run <name> --detach -- sleep 30m
-    DetachedMode --> RunningDaemon : Pre-warmed sandbox ready
-    RunningDaemon --> Exec1 : sandbox exec <name> -- python script1.py
-    Exec1 --> RunningDaemon : Captures stdout/stderr (<5ms)
-    RunningDaemon --> Exec2 : sandbox exec <name> -- python script2.py
-    Exec2 --> RunningDaemon : State preserved across calls
-    RunningDaemon --> Snapshot : sandbox tar <name> --file=out.tar
-    Snapshot --> RunningDaemon : Filesystem captured
-    RunningDaemon --> Delete : sandbox delete <name>
-    Delete --> [*] : Clean shutdown
+    subgraph ModeB ["Mode 2: Detached Stateful Execution (sandbox run)"]
+        direction LR
+        B1["1. Host Starts Daemon<br/><code>sandbox run --detach</code>"] --> B2["2. Idle Daemon Ready<br/><i>(e.g., sleep 30m)</i>"] --> B3["3. Fast Executions<br/><code>sandbox exec</code> (&lt;5ms)"] --> B4["4. Export Overlay<br/><code>sandbox tar</code>"] --> B5["5. Teardown<br/><code>sandbox delete</code>"]
+    end
 ```
 
 ```mermaid
-graph LR
-    subgraph Storage Sharing Models
-        A["Host Container Filesystem"] -->|Read-Only Default| B["Sandbox Root /"]
-        C["Volatile tmpfs"] -->|--write flag| D["Sandbox Writable Overlay"]
-        E["Host Directory (/tmp/data)"] -->|--mount type=bind,readonly| F["Sandbox Directory (/mnt/data)"]
-        G["Host Directory (/tmp/out)"] -->|--mount type=bind| H["Sandbox Directory (/mnt/out)"]
-        I["Tar Archive (state.tar)"] -->|--sync-tar=state.tar| J["Preserved Workspace Across Runs"]
+flowchart TB
+    subgraph Storage ["Filesystem Sharing Topologies"]
+        direction TB
+
+        subgraph S1 ["1. Default Baseline"]
+            direction LR
+            H1["Host Container Root (/)"] -->|"Read-Only Access"| SB1["Sandbox Baseline (Read-Only)"]
+        end
+
+        subgraph S2 ["2. Ephemeral Overlay"]
+            direction LR
+            H2["--write Flag"] -->|"Allocates RAM tmpfs"| SB2["Writable /tmp (Discarded on Exit)"]
+        end
+
+        subgraph S3 ["3. Host Directory Mount"]
+            direction LR
+            H3["Host Directory (/tmp/data)"] -->|"--mount type=bind,readonly"| SB3["Sandbox Path (/mnt/data)"]
+        end
+
+        subgraph S4 ["4. Tarball Archive Sync"]
+            direction LR
+            H4["Host Tar Archive (state.tar)"] -->|"--sync-tar=state.tar"| SB4["Two-Way State Sync"]
+        end
     end
 ```
 
@@ -509,21 +517,19 @@ Now let's explore three unique production-grade architectures that demonstrate t
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Student as Student / Coding Candidate
-    participant API as Autograder Service (Cloud Run Host)
-    participant TempDir as Ephemeral Submission Dir (/tmp/sub_abc)
-    participant Suite as Hidden Test Suite (/app/test_suite)
-    participant Box as Isolated Sandbox (sandbox do)
+    actor Student as Student Candidate
+    participant API as Autograder Service
+    participant Disk as Host Submissions (/tmp)
+    participant Box as Sandbox Process
 
-    Student->>API: POST /grade (code, problem_id="two_sum")
-    API->>TempDir: Writes solution.py
-    Note over API,Box: Sandbox launched with zero egress & dual read-only bind mounts
-    API->>Box: sandbox do --mount type=bind,source=/app/test_suite,destination=/mnt/test_suite,readonly<br/>--mount type=bind,source=/tmp/sub_abc,destination=/mnt/student,readonly<br/>-- python3 /mnt/test_suite/runner.py
-    Box->>Suite: Reads test harness & hidden test vectors
-    Box->>TempDir: Reads student solution.py
-    Box-->>API: Emits JSON verdict (PASSED/WRONG_ANSWER) on stdout
-    API->>TempDir: Deletes temporary submission folder
-    API-->>Student: Returns test breakdown & execution time
+    Student->>API: POST /grade (solution code)
+    API->>Disk: Writes solution.py to temp dir
+    API->>Box: Spawns sandbox (dual read-only mounts)
+    Note over API,Box: /app/test_suite -> /mnt/test_suite (ro)<br/>/tmp/sub -> /mnt/student (ro)
+    Box->>Box: Executes runner against hidden tests
+    Box-->>API: Returns JSON verdict on stdout
+    API->>Disk: Deletes temporary submission folder
+    API-->>Student: Returns test breakdown & metrics
 ```
 
 #### The Architecture & Challenge
@@ -608,24 +614,23 @@ The sandbox shields all host secrets and blocks disk tampering.
 ### Use Case 2: AI-Assisted Autonomous Web Scraper & Research Agent
 
 ```mermaid
-graph TD
-    User["User / Agent Planner"] -->|"POST /scrape (URL, selectors)"| Host["Cloud Run Scraper Service"]
-    Host["Host Application (Holds LLM Keys & DB Config)"]
-    
-    subgraph SandboxBoundary ["Cloud Run Sandbox (--allow-egress)"]
-        ScraperWorker["Scraper Process (urllib / BeautifulSoup / Playwright)"]
+flowchart TB
+    User["User / Agent Planner"] -->|"POST /scrape (URL)"| Host["Cloud Run Scraper Service<br/><i>(Contains LLM API Keys)</i>"]
+
+    subgraph SandboxBoundary ["Cloud Run Sandbox Boundary (--allow-egress)"]
+        Worker["Scraper Worker Process<br/><code>BeautifulSoup / urllib</code>"]
     end
-    
-    TargetWeb["Untrusted External Website"]
-    MetadataSvc["GCP Metadata Server (169.254.169.254)"]
-    
-    Host -->|"sandbox do --allow-egress -- python3 scrape.py"| ScraperWorker
-    ScraperWorker -->|"✅ Outbound HTTPS Allowed"| TargetWeb
-    TargetWeb -->>|"Returns Untrusted HTML Payload"| ScraperWorker
-    ScraperWorker -.->|"❌ BLOCKED (SSRF Protection)"| MetadataSvc
-    ScraperWorker -.->|"❌ CANNOT SEE HOST SECRETS"| Host
-    ScraperWorker -->>|"Clean Structured JSON on stdout"| Host
-    Host -->>|"Sanitized Output"| User
+
+    Target["External Website<br/><i>(Untrusted Target)</i>"]
+    Meta["GCP Metadata Server<br/><code>169.254.169.254</code>"]
+
+    Host -->|"Spawns sandbox do"| Worker
+    Worker -->|"✅ Outbound HTTPS"| Target
+    Target -->>|"Returns HTML payload"| Worker
+    Worker -.->|"❌ Blocked: SSRF Shield"| Meta
+    Worker -.->|"❌ Blocked: Cannot Read Secrets"| Host
+    Worker -->>|"Sanitized JSON (stdout)"| Host
+    Host -->>|"Clean Structured Output"| User
 ```
 
 #### The Architecture & Challenge
@@ -674,19 +679,19 @@ Even when `--allow-egress` is active, executing an SSRF probe against the metada
 ```mermaid
 sequenceDiagram
     autonumber
-    actor SecOps as Incident Responder / Alert Pipeline
-    participant Host as Detonator Host (Cloud Run)
-    participant Sandbox as Detached Sandbox (sandbox run --detach --write)
-    
-    SecOps->>Host: POST /detonate (Suspicious script payload)
-    Host->>Sandbox: 1. sandbox run detox-123 --write --detach -- sleep 5m
-    Note over Host,Sandbox: Ephemeral background sandbox initialized (<100ms)
-    Host->>Sandbox: 2. sandbox exec detox-123 -- /bin/bash /mnt/host/payload.sh
-    Sandbox-->>Sandbox: Payload drops files in /tmp, attempts C2 beacon (blocked)
-    Host->>Sandbox: 3. sandbox tar detox-123 --file=/tmp/evidence.tar
-    Host->>Sandbox: 4. sandbox delete detox-123
-    Note over Host: Extracts evidence.tar on host & scans dropped artifacts
-    Host-->>SecOps: Returns Forensic Report (Dropped files, SHA256 hashes, C2 block confirmed)
+    actor SecOps as Security Analyst
+    participant Host as Detonator Host
+    participant Box as Detached Sandbox
+
+    SecOps->>Host: POST /detonate (untrusted script)
+    Host->>Box: 1. sandbox run (starts detached daemon)
+    Note over Host,Box: Ephemeral background sandbox ready in &lt;100ms
+    Host->>Box: 2. sandbox exec (executes payload)
+    Box->>Box: Payload drops files in /tmp, C2 beacon blocked
+    Host->>Box: 3. sandbox tar (captures overlay to tar)
+    Host->>Box: 4. sandbox delete (teardown)
+    Note over Host: Extracts tar on host, calculates SHA256 & IOCs
+    Host-->>SecOps: Returns Forensic Incident Report
 ```
 
 #### The Architecture & Challenge
