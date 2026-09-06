@@ -6,8 +6,9 @@ def markdown_to_medium_html(md_text):
     diagram_map = [
         ("diagram_1_evolution.png", "The Evolution of Compute Isolation: From Bare Metal to In-Container Sandboxes"),
         ("diagram_2_zero_trust_triad.png", "The Zero-Trust Security Triad: Credential, Network, and Filesystem Boundaries"),
-        ("diagram_3_lifecycle_modes.png", "Execution Lifecycles: One-Shot (sandbox do) vs Background Detached (sandbox run)"),
-        ("diagram_4_storage_options.png", "Filesystem Sharing and Storage Topologies in Cloud Run Sandboxes"),
+        ("diagram_3a_oneshot_mode.png", "Execution Mode 1: One-Shot Lifecycle (sandbox do)"),
+        ("diagram_3b_detached_mode.png", "Execution Mode 2: Stateful Background Daemon (sandbox run & exec)"),
+        ("diagram_4_storage_options.png", "Filesystem Architecture and Storage Topologies in Cloud Run Sandboxes"),
         ("diagram_5_autograder_sequence.png", "Use Case 1: Automated Coding Assignment Autograder Architecture"),
         ("diagram_6_scraper_architecture.png", "Use Case 2: AI Web Research Scraper with Metadata SSRF Defense"),
         ("diagram_7_detonator_sequence.png", "Use Case 3: SecOps Incident Response & Malware Detonation Sandbox")
@@ -51,7 +52,13 @@ def markdown_to_medium_html(md_text):
         nonlocal in_blockquote, blockquote_lines
         if in_blockquote:
             content = " ".join(blockquote_lines)
-            output.append(f"<blockquote><p>{parse_inline(content)}</p></blockquote>")
+            alert_prefix = ""
+            for tag, icon in [("[!NOTE]", "💡 Note:"), ("[!TIP]", "⚡ Tip:"), ("[!IMPORTANT]", "⚠️ Important:"), ("[!WARNING]", "🚨 Warning:")]:
+                if content.startswith(tag):
+                    content = content[len(tag):].strip()
+                    alert_prefix = f"<strong>{icon}</strong> "
+                    break
+            output.append(f"<blockquote><p>{alert_prefix}{parse_inline(content)}</p></blockquote>")
             in_blockquote = False
             blockquote_lines = []
 

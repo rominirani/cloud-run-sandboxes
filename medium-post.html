@@ -332,34 +332,85 @@ spec:
       - image: us-central1-docker.pkg.dev/my-project/repo/image:latest
         sandboxLauncher: true</code></pre>
 <h3>How the <code>sandbox</code> CLI Works</h3>
-<p>When you enable the sandbox launcher, Cloud Run injects a helper binary into your container at <code>/usr/local/gcp/bin/sandbox</code>. You can call this binary from Python, Node.js, Go, or shell scripts.</p>
-<p>Here are the main commands you will use:</p>
-<h4>1. <code>sandbox do</code> (One-shot execution)</h4>
-<p>Spins up a new sandbox, runs your command, and destroys the sandbox as soon as it finishes:</p>
-<pre><code class="language-bash">sandbox do -- /usr/bin/python3 -c &quot;print(1 + 1)&quot;</code></pre>
-<h4>2. <code>sandbox run</code> (Background daemon)</h4>
-<p>Starts a named sandbox in the background so you can run multiple commands inside the same environment:</p>
-<pre><code class="language-bash">sandbox run my-box --detach -- /bin/bash -c &quot;sleep 10m&quot;</code></pre>
-<h4>3. <code>sandbox exec</code> (Run commands in an active sandbox)</h4>
-<p>Executes a command inside a background sandbox you started earlier. This is extremely fast (under 5 milliseconds):</p>
-<pre><code class="language-bash">sandbox exec my-box -- /usr/bin/python3 -c &quot;print(&#x27;hello from inside&#x27;)&quot;</code></pre>
-<h4>4. <code>sandbox tar</code> (Export file changes)</h4>
-<p>Saves any files that were created or modified inside a sandbox into a standard tar archive:</p>
-<pre><code class="language-bash">sandbox tar my-box --file=/tmp/saved-work.tar</code></pre>
-<h4>5. <code>sandbox delete</code> (Clean up)</h4>
-<p>Stops and removes a background sandbox:</p>
+<p>When you enable the sandbox launcher flag (<code>--sandbox-launcher</code>), Cloud Run automatically mounts a specialized management binary into your container at <code>/usr/local/gcp/bin/sandbox</code>.</p>
+<blockquote><p><strong>💡 Note:</strong> <strong>Don't worry if these look like manual terminal commands!</strong> You might look at the commands below and wonder: <em>"Wait, how do I use this inside my serverless service? Do I have to SSH into Cloud Run?"</em>  Absolutely not! In serverless applications and AI agent platforms, you rarely run these commands manually in a shell. Instead, your application runtime (FastAPI in Python, Express in Node.js, Go, or agent frameworks like LangChain and Google ADK) executes this exact binary programmatically using standard process management (such as Python's <code>subprocess.run</code>).  In <strong>Section 4</strong>, we will show you how to wrap this CLI inside a production-ready FastAPI endpoint with just 15 lines of Python code. And in <strong>Section 5</strong>, we will connect it to three complete, real-world solutions (grading student submissions, scraping the web safely, and detonating malware). For now, think of this CLI as the engine under the hood that your application code will steer.</p></blockquote>
+<p>Here are the primary commands provided by the CLI:</p>
+<h4>1. <code>sandbox do</code> (One-Shot Execution)</h4>
+<p>Spins up a clean, isolated sandbox, executes your specified command, and destroys the sandbox the instant the command finishes:</p>
+<pre><code class="language-bash">sandbox do -- /usr/bin/python3 -c &quot;print(&#x27;Hello from a fresh sandbox!&#x27;)&quot;</code></pre>
+<p>You can pass runtime flags before the <code>--</code> separator to configure capabilities, such as allowing memory writes (<code>--write</code>) or opening outbound internet access (<code>--allow-egress</code>):</p>
+<pre><code class="language-bash">sandbox do --write --allow-egress -- /usr/bin/python3 fetch_data.py</code></pre>
+<h4>2. <code>sandbox run</code> (Background Daemon)</h4>
+<p>Spins up a named sandbox and keeps it running in the background. This is ideal when you need a pre-warmed environment or want multiple commands to share memory and files:</p>
+<pre><code class="language-bash">sandbox run my-box --detach -- /bin/bash -c &quot;sleep 1h&quot;</code></pre>
+<h4>3. <code>sandbox exec</code> (Fast Interactive Command Execution)</h4>
+<p>Executes a command inside an already-running background sandbox. Because the sandbox is already warm, commands start executing in <strong>under 5 milliseconds</strong>:</p>
+<pre><code class="language-bash">sandbox exec my-box -- /usr/bin/python3 -c &quot;import pandas; print(&#x27;Running inside warm box!&#x27;)&quot;</code></pre>
+<h4>4. <code>sandbox tar</code> (Export Workspace and File Changes)</h4>
+<p>Packs any files that were created or modified inside a running sandbox into a standard tarball archive on the host:</p>
+<pre><code class="language-bash">sandbox tar my-box --file=/tmp/saved-artifacts.tar</code></pre>
+<h4>5. <code>sandbox delete</code> (Teardown and Clean Up)</h4>
+<p>Immediately terminates and removes an active background sandbox, releasing all associated memory and kernel structures:</p>
 <pre><code class="language-bash">sandbox delete my-box</code></pre>
+<hr>
 <h3>Execution Modes and Storage Options</h3>
-<p>Depending on what you are building, you have two execution modes:</p>
+<p>Now that you know the CLI primitives, let's look at how to architect your workload. Cloud Run Sandboxes give you two distinct execution lifecycles and four flexible storage options.</p>
+<h4>Execution Mode 1: One-Shot Lifecycle (<code>sandbox do</code>)</h4>
+<p>One-shot execution is the simplest and safest pattern. You invoke <code>sandbox do</code>, a fresh gVisor sandbox boots in ~150 milliseconds, executes your command to completion, streams its output back, and completely self-destructs.</p>
+<ul>
+<li><strong>Best for</strong>: Single-turn tasks such as evaluating student code submissions, parsing untrusted webhooks, grading algorithms, or one-off mathematical calculations.</li>
+<li><strong>Why it shines</strong>:</li>
+<li><strong>Absolute Hygiene</strong>: There is zero residual state. Tenant A cannot leave files, processes, or memory artifacts behind for Tenant B.</li>
+<li><strong>Zero Maintenance</strong>: You don't have to manage background processes, track session timeouts, or write teardown logic.</li>
+</ul>
 <figure>
-  <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_3_lifecycle_modes.png" alt="Execution Lifecycles: One-Shot (sandbox do) vs Background Detached (sandbox run)">
-  <figcaption>Execution Lifecycles: One-Shot (sandbox do) vs Background Detached (sandbox run)</figcaption>
+  <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_3a_oneshot_mode.png" alt="Execution Mode 1: One-Shot Lifecycle (sandbox do)">
+  <figcaption>Execution Mode 1: One-Shot Lifecycle (sandbox do)</figcaption>
 </figure>
-<p>And four ways to handle files:</p>
+<h4>Execution Mode 2: Stateful Background Daemon (<code>sandbox run</code> + <code>sandbox exec</code>)</h4>
+<p>Modern AI agents rarely solve problems in a single turn. An autonomous coding agent might write code, run tests, observe a traceback, edit a file, and re-run tests until all checks pass.</p>
+<p>If you spun up a fresh sandbox for every micro-step, the 150ms cold-start latency would add up quickly, and files saved during step 1 would disappear before step 2.</p>
+<p>Mode 2 solves this:</p>
+<ol>
+<li>You launch a detached sandbox with <code>sandbox run <id> --detach</code>. You pay the 150ms startup cost <strong>only once</strong>.</li>
+<li>Your agent runs commands inside this active environment via <code>sandbox exec <id></code>. Each command kicks off in <strong>under 5 milliseconds</strong>, delivering the responsiveness of a local shell.</li>
+<li>State and disk modifications persist in the writable overlay across multiple <code>exec</code> calls.</li>
+<li>When the task is complete, you can optionally archive modified files using <code>sandbox tar</code>, and cleanly destroy the environment with <code>sandbox delete</code>.</li>
+</ol>
+<ul>
+<li><strong>Best for</strong>: Multi-turn AI code generation, iterative bug-fixing loops, dynamic malware detonation and forensic analysis, and interactive Jupyter-style data exploration.</li>
+</ul>
 <figure>
-  <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_4_storage_options.png" alt="Filesystem Sharing and Storage Topologies in Cloud Run Sandboxes">
-  <figcaption>Filesystem Sharing and Storage Topologies in Cloud Run Sandboxes</figcaption>
+  <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_3b_detached_mode.png" alt="Execution Mode 2: Stateful Background Daemon (sandbox run & exec)">
+  <figcaption>Execution Mode 2: Stateful Background Daemon (sandbox run & exec)</figcaption>
 </figure>
+<h4>Filesystem and Storage Architecture</h4>
+<p>How do files move between your host container and the isolated sandbox? Cloud Run Sandboxes provide four storage mechanisms designed around the principle of least privilege:</p>
+<figure>
+  <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_4_storage_options.png" alt="Filesystem Architecture and Storage Topologies in Cloud Run Sandboxes">
+  <figcaption>Filesystem Architecture and Storage Topologies in Cloud Run Sandboxes</figcaption>
+</figure>
+<ol>
+<li><strong>Read-Only Root (<code>/</code>) by Default</strong>:</li>
+</ol>
+<p>The sandbox automatically inherits your host container's file system, giving untrusted code access to installed Python packages, language runtimes, and system utilities. However, the root filesystem is strictly <strong>read-only</strong>. Any attempt by untrusted code to run <code>rm -rf /</code>, overwrite system binaries, or alter configuration files fails immediately with <code>EROFS: Read-only file system</code>.</p>
+<ol>
+<li><strong>In-Memory Scratchpad (<code>--write</code> or <code>--write /path</code>)</strong>:</li>
+</ol>
+<p>If your code needs to compile binaries, generate temporary files, or write output CSVs, pass <code>--write</code> (or <code>--write /path</code>). This attaches a fast, memory-backed <code>tmpfs</code> layer. Because it lives purely in RAM, operations are blazingly fast and never touch physical disks. Once the sandbox stops, this memory layer is purged completely.</p>
+<ol>
+<li><strong>Targeted Host Bind Mounts (<code>--mount</code>)</strong>:</li>
+</ol>
+<p>When you need to feed specific data into the sandbox (like reference unit tests, model weights, or input images), use bind mounts:</p>
+<pre><code class="language-bash">   --mount type=bind,source=/tmp/tests,target=/mnt/tests,readonly</code></pre>
+<p>Specifying <code>readonly</code> guarantees that the sandbox cannot tamper with the original test files or datasets on the host.</p>
+<ol>
+<li><strong>Archive Snapshots and Workspace Sync (<code>sandbox tar</code> and <code>--sync-tar</code>)</strong>:</li>
+</ol>
+<p>To preserve work across separate sandbox runs or save generated files to Cloud Storage, you can snapshot modified files using <code>sandbox tar</code>:</p>
+<pre><code class="language-bash">   sandbox tar my-box --file=/tmp/output.tar</code></pre>
+<p>Conversely, when launching a new sandbox, you can pre-seed it with an existing workspace archive using <code>--sync-tar</code>:</p>
+<pre><code class="language-bash">   sandbox do --sync-tar=/tmp/project-template.tar -- /bin/bash run_build.sh</code></pre>
 <hr>
 <h2>4. A 101 Example: A Safe Code Execution Service</h2>
 <p>Let's build a minimal FastAPI service that accepts Python or Bash code over HTTP and runs it inside a sandbox.</p>

@@ -156,69 +156,176 @@ spec:
 
 ### How the `sandbox` CLI Works
 
-When you enable the sandbox launcher, Cloud Run injects a helper binary into your container at `/usr/local/gcp/bin/sandbox`. You can call this binary from Python, Node.js, Go, or shell scripts.
+When you enable the sandbox launcher flag (`--sandbox-launcher`), Cloud Run automatically mounts a specialized management binary into your container at `/usr/local/gcp/bin/sandbox`.
 
-Here are the main commands you will use:
+> [!NOTE]
+> **Don't worry if these look like manual terminal commands!**
+> You might look at the commands below and wonder: *"Wait, how do I use this inside my serverless service? Do I have to SSH into Cloud Run?"*
+>
+> Absolutely not! In serverless applications and AI agent platforms, you rarely run these commands manually in a shell. Instead, your application runtime (FastAPI in Python, Express in Node.js, Go, or agent frameworks like LangChain and Google ADK) executes this exact binary programmatically using standard process management (such as Python's `subprocess.run`).
+>
+> In **Section 4**, we will show you how to wrap this CLI inside a production-ready FastAPI endpoint with just 15 lines of Python code. And in **Section 5**, we will connect it to three complete, real-world solutions (grading student submissions, scraping the web safely, and detonating malware). For now, think of this CLI as the engine under the hood that your application code will steer.
 
-#### 1. `sandbox do` (One-shot execution)
-Spins up a new sandbox, runs your command, and destroys the sandbox as soon as it finishes:
+Here are the primary commands provided by the CLI:
+
+#### 1. `sandbox do` (One-Shot Execution)
+Spins up a clean, isolated sandbox, executes your specified command, and destroys the sandbox the instant the command finishes:
 ```bash
-sandbox do -- /usr/bin/python3 -c "print(1 + 1)"
+sandbox do -- /usr/bin/python3 -c "print('Hello from a fresh sandbox!')"
+```
+You can pass runtime flags before the `--` separator to configure capabilities, such as allowing memory writes (`--write`) or opening outbound internet access (`--allow-egress`):
+```bash
+sandbox do --write --allow-egress -- /usr/bin/python3 fetch_data.py
 ```
 
-#### 2. `sandbox run` (Background daemon)
-Starts a named sandbox in the background so you can run multiple commands inside the same environment:
+#### 2. `sandbox run` (Background Daemon)
+Spins up a named sandbox and keeps it running in the background. This is ideal when you need a pre-warmed environment or want multiple commands to share memory and files:
 ```bash
-sandbox run my-box --detach -- /bin/bash -c "sleep 10m"
+sandbox run my-box --detach -- /bin/bash -c "sleep 1h"
 ```
 
-#### 3. `sandbox exec` (Run commands in an active sandbox)
-Executes a command inside a background sandbox you started earlier. This is extremely fast (under 5 milliseconds):
+#### 3. `sandbox exec` (Fast Interactive Command Execution)
+Executes a command inside an already-running background sandbox. Because the sandbox is already warm, commands start executing in **under 5 milliseconds**:
 ```bash
-sandbox exec my-box -- /usr/bin/python3 -c "print('hello from inside')"
+sandbox exec my-box -- /usr/bin/python3 -c "import pandas; print('Running inside warm box!')"
 ```
 
-#### 4. `sandbox tar` (Export file changes)
-Saves any files that were created or modified inside a sandbox into a standard tar archive:
+#### 4. `sandbox tar` (Export Workspace and File Changes)
+Packs any files that were created or modified inside a running sandbox into a standard tarball archive on the host:
 ```bash
-sandbox tar my-box --file=/tmp/saved-work.tar
+sandbox tar my-box --file=/tmp/saved-artifacts.tar
 ```
 
-#### 5. `sandbox delete` (Clean up)
-Stops and removes a background sandbox:
+#### 5. `sandbox delete` (Teardown and Clean Up)
+Immediately terminates and removes an active background sandbox, releasing all associated memory and kernel structures:
 ```bash
 sandbox delete my-box
 ```
 
+---
+
 ### Execution Modes and Storage Options
 
-Depending on what you are building, you have two execution modes:
+Now that you know the CLI primitives, let's look at how to architect your workload. Cloud Run Sandboxes give you two distinct execution lifecycles and four flexible storage options.
+
+#### Execution Mode 1: One-Shot Lifecycle (`sandbox do`)
+
+One-shot execution is the simplest and safest pattern. You invoke `sandbox do`, a fresh gVisor sandbox boots in ~150 milliseconds, executes your command to completion, streams its output back, and completely self-destructs.
+
+* **Best for**: Single-turn tasks such as evaluating student code submissions, parsing untrusted webhooks, grading algorithms, or one-off mathematical calculations.
+* **Why it shines**:
+  * **Absolute Hygiene**: There is zero residual state. Tenant A cannot leave files, processes, or memory artifacts behind for Tenant B.
+  * **Zero Maintenance**: You don't have to manage background processes, track session timeouts, or write teardown logic.
 
 ```mermaid
 flowchart TD
-    subgraph Mode1 ["Mode 1: One-Shot Task (sandbox do)"]
-        A["Call 'sandbox do'"] --> B["Spins up in under 200ms"]
-        B --> C["Runs code in isolation"]
-        C --> D["Sandbox deleted immediately"]
-    end
+    A["1. Host Application<br/>(FastAPI / Agent Server)"] -->|"Calls 'sandbox do [flags] -- [command]'<br/>via subprocess.run"| B["2. Sandbox Launcher<br/>(/usr/local/gcp/bin/sandbox)"]
+    B -->|"Provisions fresh gVisor kernel<br/>(~150ms cold start)"| C["3. Isolated Sandbox Container<br/>- Read-only root filesystem<br/>- No access to host env vars<br/>- Zero network egress by default"]
+    C -->|"Executes untrusted script to completion"| D["4. Capture Output<br/>(stdout, stderr, exit code)"]
+    D -->|"Returns response synchronously"| A
+    C -.->|"Instant teardown upon command exit"| E["5. Complete Memory Dissolution<br/>(Zero leftover disk or RAM state)"]
 
-    subgraph Mode2 ["Mode 2: Background Sandbox (sandbox run)"]
-        E["Call 'sandbox run --detach'"] --> F["Pre-warmed sandbox stays alive"]
-        F --> G["Run fast commands via 'sandbox exec'"]
-        G --> H["Save files via 'sandbox tar'"]
-        H --> I["Shut down via 'sandbox delete'"]
-    end
+    style A fill:#E8F0FE,stroke:#1A73E8,stroke-width:2px
+    style B fill:#FEF7E0,stroke:#F9AB00,stroke-width:2px
+    style C fill:#FCE8E6,stroke:#D93025,stroke-width:2px
+    style D fill:#E6F4EA,stroke:#137333,stroke-width:2px
+    style E fill:#F1F3F4,stroke:#5F6368,stroke-width:2px
 ```
 
-And four ways to handle files:
+#### Execution Mode 2: Stateful Background Daemon (`sandbox run` + `sandbox exec`)
+
+Modern AI agents rarely solve problems in a single turn. An autonomous coding agent might write code, run tests, observe a traceback, edit a file, and re-run tests until all checks pass. 
+
+If you spun up a fresh sandbox for every micro-step, the 150ms cold-start latency would add up quickly, and files saved during step 1 would disappear before step 2.
+
+Mode 2 solves this:
+1. You launch a detached sandbox with `sandbox run <id> --detach`. You pay the 150ms startup cost **only once**.
+2. Your agent runs commands inside this active environment via `sandbox exec <id>`. Each command kicks off in **under 5 milliseconds**, delivering the responsiveness of a local shell.
+3. State and disk modifications persist in the writable overlay across multiple `exec` calls.
+4. When the task is complete, you can optionally archive modified files using `sandbox tar`, and cleanly destroy the environment with `sandbox delete`.
+
+* **Best for**: Multi-turn AI code generation, iterative bug-fixing loops, dynamic malware detonation and forensic analysis, and interactive Jupyter-style data exploration.
 
 ```mermaid
 flowchart TD
-    HostDisk["Host Container Filesystem"] -->|Read-only by default| SB_Root["Sandbox Root (/)"]
-    TmpfsFlag["--write flag"] -->|Temporary in-memory storage| SB_Tmp["Writable /tmp (deleted on exit)"]
-    MountFlag["--mount flag"] -->|Share specific host folder| SB_Mount["Mounted Folder (/mnt/...)"]
-    TarFlag["--sync-tar flag"] -->|Save and restore files| SB_Tar["Preserved Workspace Across Calls"]
+    subgraph Step1 ["Phase 1: Pre-Warming (Cold Start)"]
+        A1["Host Application"] -->|"1. sandbox run session-1 --detach"| B1["Provision Background Sandbox<br/>(~150ms cold start)"]
+        B1 --> C1["Persistent gVisor Sandbox<br/>(Kept alive in background)"]
+    end
+
+    subgraph Step2 ["Phase 2: Interactive Execution Loop (Sub-5ms)"]
+        A2["AI Agent / User"] -->|"2a. sandbox exec session-1 -- pip install reqs"| C1
+        C1 -->|"2b. sandbox exec session-1 -- python main.py"| C1
+        C1 -->|"2c. sandbox exec session-1 -- pytest tests/"| C1
+        C1 -->|"Sub-5ms command latency<br/>Files and state persist across calls"| A2
+    end
+
+    subgraph Step3 ["Phase 3: Snapshot & Teardown"]
+        C1 -->|"3. sandbox tar session-1 --file=/tmp/result.tar"| D1["Host Workspace<br/>(Extract modified artifacts/logs)"]
+        D1 -->|"4. sandbox delete session-1"| E1["Sandbox Destroyed<br/>(RAM and resources reclaimed)"]
+    end
+
+    style Step1 fill:#f8f9fa,stroke:#1a73e8,stroke-dasharray: 5 5
+    style Step2 fill:#f8f9fa,stroke:#137333,stroke-dasharray: 5 5
+    style Step3 fill:#f8f9fa,stroke:#d93025,stroke-dasharray: 5 5
+    style C1 fill:#e8f0fe,stroke:#1a73e8,stroke-width:2px
 ```
+
+#### Filesystem and Storage Architecture
+
+How do files move between your host container and the isolated sandbox? Cloud Run Sandboxes provide four storage mechanisms designed around the principle of least privilege:
+
+```mermaid
+flowchart LR
+    subgraph Host ["Host Container (Your Service)"]
+        HostRoot["Base Container Filesystem<br/>(/usr, /bin, Python env)"]
+        HostData["Host Shared Directory<br/>(/tmp/grading/tests)"]
+        HostTar["Local Archive File<br/>(/tmp/workspace.tar)"]
+    end
+
+    subgraph Sandbox ["Isolated gVisor Sandbox Environment"]
+        SBRoot["Sandbox Root (/)<br/>Strictly READ-ONLY"]
+        SBMount["Mounted Folder (/mnt/tests)<br/>Selective Read-Only Bind"]
+        SBTmp["In-Memory Scratchpad (/tmp)<br/>Writable tmpfs overlay (RAM)"]
+        SBTar["Active Workspace (/workspace)<br/>Restored from Tarball"]
+    end
+
+    HostRoot -->|"1. Mirrored as Read-Only"| SBRoot
+    HostData -->|"2. --mount type=bind,readonly"| SBMount
+    HostTar -->|"4. --sync-tar pre-populates"| SBTar
+    SBTmp -->|"3. --write flag enables RAM overlay"| SBTmp
+    SBTar -.->|"5. 'sandbox tar' exports changes"| HostTar
+
+    style Host fill:#F8F9FA,stroke:#3C4043,stroke-width:2px
+    style Sandbox fill:#E8F0FE,stroke:#1A73E8,stroke-width:2px
+    style SBRoot fill:#FCE8E6,stroke:#D93025
+    style SBMount fill:#FEF7E0,stroke:#F9AB00
+    style SBTmp fill:#E6F4EA,stroke:#137333
+    style SBTar fill:#E8EAED,stroke:#5F6368
+```
+
+1. **Read-Only Root (`/`) by Default**:
+   The sandbox automatically inherits your host container's file system, giving untrusted code access to installed Python packages, language runtimes, and system utilities. However, the root filesystem is strictly **read-only**. Any attempt by untrusted code to run `rm -rf /`, overwrite system binaries, or alter configuration files fails immediately with `EROFS: Read-only file system`.
+
+2. **In-Memory Scratchpad (`--write` or `--write /path`)**:
+   If your code needs to compile binaries, generate temporary files, or write output CSVs, pass `--write` (or `--write /path`). This attaches a fast, memory-backed `tmpfs` layer. Because it lives purely in RAM, operations are blazingly fast and never touch physical disks. Once the sandbox stops, this memory layer is purged completely.
+
+3. **Targeted Host Bind Mounts (`--mount`)**:
+   When you need to feed specific data into the sandbox (like reference unit tests, model weights, or input images), use bind mounts:
+   ```bash
+   --mount type=bind,source=/tmp/tests,target=/mnt/tests,readonly
+   ```
+   Specifying `readonly` guarantees that the sandbox cannot tamper with the original test files or datasets on the host.
+
+4. **Archive Snapshots and Workspace Sync (`sandbox tar` and `--sync-tar`)**:
+   To preserve work across separate sandbox runs or save generated files to Cloud Storage, you can snapshot modified files using `sandbox tar`:
+   ```bash
+   sandbox tar my-box --file=/tmp/output.tar
+   ```
+   Conversely, when launching a new sandbox, you can pre-seed it with an existing workspace archive using `--sync-tar`:
+   ```bash
+   sandbox do --sync-tar=/tmp/project-template.tar -- /bin/bash run_build.sh
+   ```
 
 ---
 
