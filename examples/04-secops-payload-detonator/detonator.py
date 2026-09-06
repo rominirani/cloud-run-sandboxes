@@ -128,47 +128,53 @@ def detonate_payload(req: DetonationRequest):
             session_id,
             f"--file={tar_path}"
         ]
-        subprocess.run(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        tar_proc = subprocess.run(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if tar_proc.returncode != 0:
+            stderr_captured += f"\n[tar error rc={tar_proc.returncode}]: {tar_proc.stderr} {tar_proc.stdout}"
 
         # Step 4: Inspect the exported tar archive on the host container
-        if os.path.exists(tar_path) and os.path.getsize(tar_path) > 0:
-            extract_dir = os.path.join(host_workdir, "extracted")
-            os.makedirs(extract_dir, exist_ok=True)
-            try:
-                with tarfile.open(tar_path, "r") as tar:
-                    tar.extractall(path=extract_dir)
+        if os.path.exists(tar_path):
+            tar_size = os.path.getsize(tar_path)
+            if tar_size == 0:
+                stderr_captured += f"\n[tar archive is empty (0 bytes)]"
+            else:
+                extract_dir = os.path.join(host_workdir, "extracted")
+                os.makedirs(extract_dir, exist_ok=True)
+                try:
+                    with tarfile.open(tar_path, "r") as tar:
+                        tar.extractall(path=extract_dir)
 
-                # Scan for dropped files
-                for root, _, files in os.walk(extract_dir):
-                    for fname in files:
-                        full_path = os.path.join(root, fname)
-                        rel_path = os.path.relpath(full_path, extract_dir)
-                        file_size = os.path.getsize(full_path)
-                        
-                        # Calculate sha256
-                        h = hashlib.sha256()
-                        with open(full_path, "rb") as bf:
-                            while chunk := bf.read(4096):
-                                h.update(chunk)
-                        file_sha = h.hexdigest()
+                    # Scan for dropped files
+                    for root, _, files in os.walk(extract_dir):
+                        for fname in files:
+                            full_path = os.path.join(root, fname)
+                            rel_path = os.path.relpath(full_path, extract_dir)
+                            file_size = os.path.getsize(full_path)
+                            
+                            # Calculate sha256
+                            h = hashlib.sha256()
+                            with open(full_path, "rb") as bf:
+                                while chunk := bf.read(4096):
+                                    h.update(chunk)
+                            file_sha = h.hexdigest()
 
-                        # Read preview
-                        try:
-                            with open(full_path, "r", errors="ignore") as tf:
-                                preview = tf.read(200).replace("\n", " ")
-                        except Exception:
-                            preview = "<binary content>"
+                            # Read preview
+                            try:
+                                with open(full_path, "r", errors="ignore") as tf:
+                                    preview = tf.read(200).replace("\n", " ")
+                            except Exception:
+                                preview = "<binary content>"
 
-                        dropped_artifacts.append(
-                            DroppedFileArtifact(
-                                filename=f"/{rel_path}",
-                                size_bytes=file_size,
-                                sha256=file_sha,
-                                preview=preview,
+                            dropped_artifacts.append(
+                                DroppedFileArtifact(
+                                    filename=f"/{rel_path}",
+                                    size_bytes=file_size,
+                                    sha256=file_sha,
+                                    preview=preview,
+                                )
                             )
-                        )
-            except Exception as ex:
-                stderr_captured += f"\nFailed parsing forensic tar: {ex}"
+                except Exception as ex:
+                    stderr_captured += f"\nFailed parsing forensic tar: {ex}"
 
     finally:
         # Step 5: Clean up sandbox and host temporary files
