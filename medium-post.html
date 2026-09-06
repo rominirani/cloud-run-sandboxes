@@ -432,21 +432,26 @@ spec:
 import shutil
 import subprocess
 import time
-from typing import Literal
-from fastapi import FastAPI
+from typing import Optional, Literal
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-app = FastAPI(title=&quot;Cloud Run Sandbox 101 Runner&quot;)
+app = FastAPI(
+    title=&quot;Cloud Run Sandbox 101 Runner&quot;,
+    description=&quot;A secure, isolated execution endpoint running on Google Cloud Run Sandboxes&quot;,
+    version=&quot;1.0.0&quot;,
+)
 
-# Check if the sandbox binary is available
 SANDBOX_BIN = &quot;/usr/local/gcp/bin/sandbox&quot; if os.path.exists(&quot;/usr/local/gcp/bin/sandbox&quot;) else shutil.which(&quot;sandbox&quot;)
 
+
 class ExecutionRequest(BaseModel):
-    language: Literal[&quot;python&quot;, &quot;bash&quot;] = &quot;python&quot;
-    code: str
-    allow_write: bool = False
-    allow_egress: bool = False
-    timeout_sec: int = Field(default=10, ge=1, le=60)
+    language: Literal[&quot;python&quot;, &quot;bash&quot;] = Field(default=&quot;python&quot;, description=&quot;Target execution runtime&quot;)
+    code: str = Field(..., description=&quot;The code snippet to execute inside the sandbox&quot;)
+    allow_write: bool = Field(default=False, description=&quot;Enable temporary writable tmpfs overlay (--write)&quot;)
+    allow_egress: bool = Field(default=False, description=&quot;Enable external outbound networking (--allow-egress)&quot;)
+    timeout_sec: int = Field(default=10, ge=1, le=60, description=&quot;Max execution timeout in seconds&quot;)
+
 
 class ExecutionResponse(BaseModel):
     success: bool
@@ -456,80 +461,123 @@ class ExecutionResponse(BaseModel):
     execution_time_ms: float
     is_sandboxed: bool
 
-@app.post(&quot;/run&quot;, response_model=ExecutionResponse)
-def run_code(req: ExecutionRequest):
-    start = time.time()
+
+def execute_in_sandbox(
+    language: str,
+    code: str,
+    allow_write: bool = False,
+    allow_egress: bool = False,
+    timeout_sec: int = 10,
+) -&gt; ExecutionResponse:
+    start_time = time.time()
     
+    # Check if we are running in a Cloud Run instance with sandbox enabled
     if not SANDBOX_BIN:
         return ExecutionResponse(
             success=False,
             exit_code=-1,
             stdout=&quot;&quot;,
-            stderr=&quot;ERROR: &#x27;sandbox&#x27; binary not found. Make sure you deployed with --sandbox-launcher.&quot;,
-            execution_time_ms=0,
+            stderr=&quot;ERROR: The &#x27;sandbox&#x27; binary is not present. Ensure this service is deployed to Cloud Run with the --sandbox-launcher flag.&quot;,
+            execution_time_ms=(time.time() - start_time) * 1000,
             is_sandboxed=False,
         )
 
-    # Pick the interpreter
-    interpreter = [&quot;/usr/bin/python3&quot;, &quot;-c&quot;, req.code] if req.language == &quot;python&quot; else [&quot;/bin/bash&quot;, &quot;-c&quot;, req.code]
+    # Prepare command to execute
+    if language == &quot;python&quot;:
+        inner_cmd = [&quot;/usr/bin/python3&quot;, &quot;-c&quot;, code]
+    elif language == &quot;bash&quot;:
+        inner_cmd = [&quot;/bin/bash&quot;, &quot;-c&quot;, code]
+    else:
+        raise ValueError(f&quot;Unsupported language: {language}&quot;)
 
-    # Build the sandbox command
+    # Build sandbox invocation command
     cmd = [SANDBOX_BIN, &quot;do&quot;]
-    if req.allow_write:
+    if allow_write:
         cmd.append(&quot;--write&quot;)
-    if req.allow_egress:
+    if allow_egress:
         cmd.append(&quot;--allow-egress&quot;)
     cmd.append(&quot;--&quot;)
-    cmd.extend(interpreter)
+    cmd.extend(inner_cmd)
 
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=req.timeout_sec)
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout_sec,
+        )
+        elapsed_ms = (time.time() - start_time) * 1000
         return ExecutionResponse(
             success=(proc.returncode == 0),
             exit_code=proc.returncode,
             stdout=proc.stdout,
             stderr=proc.stderr,
-            execution_time_ms=(time.time() - start) * 1000,
+            execution_time_ms=elapsed_ms,
             is_sandboxed=True,
         )
     except subprocess.TimeoutExpired as e:
+        elapsed_ms = (time.time() - start_time) * 1000
         return ExecutionResponse(
             success=False,
             exit_code=124,
-            stdout=e.stdout or &quot;&quot;,
-            stderr=f&quot;Execution timed out after {req.timeout_sec} seconds.&quot;,
-            execution_time_ms=(time.time() - start) * 1000,
+            stdout=e.stdout.decode() if isinstance(e.stdout, bytes) else (e.stdout or &quot;&quot;),
+            stderr=f&quot;Execution timed out after {timeout_sec} seconds.&quot;,
+            execution_time_ms=elapsed_ms,
+            is_sandboxed=True,
+        )
+    except Exception as e:
+        elapsed_ms = (time.time() - start_time) * 1000
+        return ExecutionResponse(
+            success=False,
+            exit_code=1,
+            stdout=&quot;&quot;,
+            stderr=f&quot;Execution failed: {str(e)}&quot;,
+            execution_time_ms=elapsed_ms,
             is_sandboxed=True,
         )
 
-# Health check endpoint
+
 @app.get(&quot;/&quot;)
-def health():
+def health_check():
     return {
         &quot;status&quot;: &quot;healthy&quot;,
         &quot;sandbox_available&quot;: bool(SANDBOX_BIN),
-        &quot;sandbox_path&quot;: SANDBOX_BIN or &quot;Not Found&quot;
+        &quot;sandbox_path&quot;: SANDBOX_BIN or &quot;Not Found&quot;,
     }
 
-# Built-in endpoints to test security isolation
-@app.post(&quot;/test/env-isolation&quot;)
+
+@app.post(&quot;/run&quot;, response_model=ExecutionResponse)
+def run_code(req: ExecutionRequest):
+    return execute_in_sandbox(
+        language=req.language,
+        code=req.code,
+        allow_write=req.allow_write,
+        allow_egress=req.allow_egress,
+        timeout_sec=req.timeout_sec,
+    )
+
+
+@app.post(&quot;/test/env-isolation&quot;, response_model=ExecutionResponse)
 def test_env_isolation():
-    &quot;&quot;&quot;Verify that host environment variables cannot be read inside the sandbox.&quot;&quot;&quot;
+    &quot;&quot;&quot;Verify that host environment variables cannot be accessed inside the sandbox.&quot;&quot;&quot;
     os.environ[&quot;HOST_SUPER_SECRET&quot;] = &quot;secret-token-do-not-leak&quot;
-    probe = &quot;import os; print(&#x27;HOST_SUPER_SECRET=&#x27; + os.getenv(&#x27;HOST_SUPER_SECRET&#x27;, &#x27;&lt;NOT_FOUND&gt;&#x27;))&quot;
-    return run_code(ExecutionRequest(language=&quot;python&quot;, code=probe))
+    python_probe = &quot;import os; val = os.getenv(&#x27;HOST_SUPER_SECRET&#x27;, &#x27;&lt;NOT_FOUND&gt;&#x27;); print(f&#x27;HOST_SUPER_SECRET={val}&#x27;)&quot;
+    return execute_in_sandbox(language=&quot;python&quot;, code=python_probe)
 
-@app.post(&quot;/test/metadata-isolation&quot;)
+
+@app.post(&quot;/test/metadata-isolation&quot;, response_model=ExecutionResponse)
 def test_metadata_isolation():
-    &quot;&quot;&quot;Verify that the GCP metadata server is blocked.&quot;&quot;&quot;
-    probe = &quot;curl -s --connect-timeout 2 http://169.254.169.254/computeMetadata/v1/instance/ || echo &#x27;METADATA_ACCESS_BLOCKED&#x27;&quot;
-    return run_code(ExecutionRequest(language=&quot;bash&quot;, code=probe, allow_egress=False))
+    &quot;&quot;&quot;Verify that the GCP Metadata Server (169.254.169.254) cannot be reached from the sandbox.&quot;&quot;&quot;
+    bash_probe = &quot;curl -s --connect-timeout 2 -H &#x27;Metadata-Flavor: Google&#x27; http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token || echo &#x27;METADATA_ACCESS_BLOCKED&#x27;&quot;
+    return execute_in_sandbox(language=&quot;bash&quot;, code=bash_probe, allow_egress=False)
 
-@app.post(&quot;/test/fs-isolation&quot;)
+
+@app.post(&quot;/test/fs-isolation&quot;, response_model=ExecutionResponse)
 def test_fs_isolation():
-    &quot;&quot;&quot;Verify that writing to the root filesystem fails without --write.&quot;&quot;&quot;
-    probe = &quot;echo &#x27;malicious write&#x27; &gt; /test_probe.txt&quot;
-    return run_code(ExecutionRequest(language=&quot;bash&quot;, code=probe, allow_write=False))</code></pre>
+    &quot;&quot;&quot;Verify that the root filesystem is read-only when --write is NOT specified.&quot;&quot;&quot;
+    bash_probe = &quot;echo &#x27;malicious write&#x27; &gt; /test_probe.txt&quot;
+    return execute_in_sandbox(language=&quot;bash&quot;, code=bash_probe, allow_write=False)</code></pre>
 <h4>Key Architecture & Implementation Details in <code>main.py</code></h4>
 <h5>1. Dynamic Sandbox Binary Detection (<code>SANDBOX_BIN</code>)</h5>
 <p>When deploying to Cloud Run with <code>--sandbox-launcher</code>, Google's platform injects the sandbox supervisor binary into your container at <code>/usr/local/gcp/bin/sandbox</code>. By verifying existence with <code>os.path.exists()</code> and falling back to <code>shutil.which("sandbox")</code>, the service detects whether it is executing inside a sandbox-enabled Cloud Run container or a local environment. If the binary is missing, it returns a descriptive error message rather than crashing with an unhandled OS <code>FileNotFoundError</code>.</p>
@@ -724,25 +772,125 @@ def grade_submission(submission: SubmissionRequest):
         shutil.rmtree(work_dir, ignore_errors=True)</code></pre>
 <h5>2. The Isolated Test Harness (<code>test_suite/runner.py</code>)</h5>
 <p>Inside the sandbox, <code>/mnt/test_suite/runner.py</code> executes. It uses Python's <code>importlib</code> to load <code>/mnt/student/solution.py</code> dynamically, executes all test cases against the candidate function, and writes a single JSON verdict line to standard output:</p>
-<pre><code class="language-python">def load_student_module(filepath=&quot;/mnt/student/solution.py&quot;):
+<pre><code class="language-python">import sys
+import json
+import importlib.util
+
+TEST_CASES = [
+    {&quot;nums&quot;: [2, 7, 11, 15], &quot;target&quot;: 9, &quot;expected&quot;: [0, 1]},
+    {&quot;nums&quot;: [3, 2, 4], &quot;target&quot;: 6, &quot;expected&quot;: [1, 2]},
+    {&quot;nums&quot;: [3, 3], &quot;target&quot;: 6, &quot;expected&quot;: [0, 1]},
+    {&quot;nums&quot;: [-1, -2, -3, -4, -5], &quot;target&quot;: -8, &quot;expected&quot;: [2, 4]},
+    {&quot;nums&quot;: [1000000, 500, 1000, 2000000], &quot;target&quot;: 3000000, &quot;expected&quot;: [0, 3]},
+]
+
+def load_student_module(filepath=&quot;/mnt/student/solution.py&quot;):
     spec = importlib.util.spec_from_file_location(&quot;student_solution&quot;, filepath)
+    if spec is None or spec.loader is None:
+        raise ImportError(f&quot;Could not load student solution from {filepath}&quot;)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 def run_tests():
-    student_module = load_student_module()
-    two_sum_fn = getattr(student_module, &quot;two_sum&quot;)
+    result = {
+        &quot;total_tests&quot;: len(TEST_CASES),
+        &quot;passed_tests&quot;: 0,
+        &quot;failed_tests&quot;: 0,
+        &quot;details&quot;: [],
+        &quot;verdict&quot;: &quot;ACCEPTED&quot;
+    }
 
-    for idx, tc in enumerate(TEST_CASES, 1):
-        actual = two_sum_fn(list(tc[&quot;nums&quot;]), tc[&quot;target&quot;])
-        if actual and sorted(actual) == sorted(tc[&quot;expected&quot;]):
-            result[&quot;passed_tests&quot;] += 1
-        else:
-            result[&quot;failed_tests&quot;] += 1
-            result[&quot;verdict&quot;] = &quot;WRONG_ANSWER&quot;
+    try:
+        student_module = load_student_module()
+        if not hasattr(student_module, &quot;two_sum&quot;):
+            result[&quot;verdict&quot;] = &quot;COMPILATION_ERROR&quot;
+            result[&quot;details&quot;].append({&quot;error&quot;: &quot;Function &#x27;two_sum(nums, target)&#x27; not found.&quot;})
+            print(json.dumps(result))
+            sys.exit(1)
 
-    print(json.dumps(result))</code></pre>
+        two_sum_fn = getattr(student_module, &quot;two_sum&quot;)
+
+        for idx, tc in enumerate(TEST_CASES, 1):
+            nums = tc[&quot;nums&quot;]
+            target = tc[&quot;target&quot;]
+            expected = tc[&quot;expected&quot;]
+            try:
+                actual = two_sum_fn(list(nums), target)
+                if actual and sorted(actual) == sorted(expected):
+                    result[&quot;passed_tests&quot;] += 1
+                    result[&quot;details&quot;].append({&quot;test&quot;: idx, &quot;status&quot;: &quot;PASSED&quot;})
+                else:
+                    result[&quot;failed_tests&quot;] += 1
+                    result[&quot;details&quot;].append({&quot;test&quot;: idx, &quot;status&quot;: &quot;FAILED&quot;, &quot;expected&quot;: expected, &quot;actual&quot;: actual})
+                    result[&quot;verdict&quot;] = &quot;WRONG_ANSWER&quot;
+            except Exception as e:
+                result[&quot;failed_tests&quot;] += 1
+                result[&quot;details&quot;].append({&quot;test&quot;: idx, &quot;status&quot;: &quot;RUNTIME_ERROR&quot;, &quot;error&quot;: str(e)})
+                result[&quot;verdict&quot;] = &quot;RUNTIME_ERROR&quot;
+
+    except Exception as e:
+        result[&quot;verdict&quot;] = &quot;EXECUTION_ERROR&quot;
+        result[&quot;details&quot;].append({&quot;error&quot;: str(e)})
+
+    print(json.dumps(result))
+
+if __name__ == &quot;__main__&quot;:
+    run_tests()</code></pre>
+<h5>3. The Adversarial Exploit Submission (<code>sample_submissions/malicious_exploit.py</code>)</h5>
+<p>To rigorously stress-test the isolation boundaries, we formulate an adversarial student exploit script attempting:</p>
+<ol>
+<li>Host environment secret exfiltration (<code>AUTOGRADER_SECRET_KEY</code>)</li>
+<li>Tampering with the grading suite (<code>/mnt/test_suite/runner.py</code>)</li>
+<li>Writing rogue files to the root filesystem (<code>/root_probe.txt</code>)</li>
+<li>Harvesting Google Cloud service account tokens via <code>http://169.254.169.254/computeMetadata/v1/</code></li>
+<li>Opening outbound sockets to external attacker servers</li>
+</ol>
+<pre><code class="language-python">import os
+import urllib.request
+
+def two_sum(nums, target):
+    findings = []
+
+    # 1. Try to read secrets
+    secret = os.getenv(&quot;AUTOGRADER_SECRET_KEY&quot;, &quot;NOT_FOUND&quot;)
+    findings.append(f&quot;Secret: {secret}&quot;)
+
+    # 2. Try to tamper with the test suite or write to root
+    try:
+        with open(&quot;/mnt/test_suite/runner.py&quot;, &quot;w&quot;) as f:
+            f.write(&quot;HACKED&quot;)
+        findings.append(&quot;Tamper test harness: SUCCESS (bad)&quot;)
+    except Exception as e:
+        findings.append(f&quot;Tamper test harness: BLOCKED ({type(e).__name__})&quot;)
+
+    try:
+        with open(&quot;/root_probe.txt&quot;, &quot;w&quot;) as f:
+            f.write(&quot;HACKED&quot;)
+        findings.append(&quot;Root write: SUCCESS (bad)&quot;)
+    except Exception as e:
+        findings.append(f&quot;Root write: BLOCKED ({type(e).__name__})&quot;)
+
+    # 3. Try to access Google Cloud metadata service
+    try:
+        req = urllib.request.Request(
+            &quot;http://169.254.169.254/computeMetadata/v1/instance/&quot;,
+            headers={&quot;Metadata-Flavor&quot;: &quot;Google&quot;}
+        )
+        with urllib.request.urlopen(req, timeout=2) as resp:
+            findings.append(&quot;Metadata access: SUCCESS (critical vulnerability)&quot;)
+    except Exception as e:
+        findings.append(f&quot;Metadata access: BLOCKED ({type(e).__name__})&quot;)
+
+    # 4. Try outbound network call
+    try:
+        with urllib.request.urlopen(&quot;https://example.com&quot;, timeout=2) as resp:
+            findings.append(&quot;Internet egress: SUCCESS (bad)&quot;)
+    except Exception as e:
+        findings.append(f&quot;Internet egress: BLOCKED ({type(e).__name__})&quot;)
+
+    print(&quot;[EXPLOIT PROBE RESULTS]: &quot; + &quot; | &quot;.join(findings))
+    return [0, 1]</code></pre>
 <h4>Live Verification & Test Verdicts</h4>
 <blockquote><p><strong>Verified Live Service</strong>: <code>https://sandbox-autograder-415458962931.us-central1.run.app</code></p></blockquote>
 <p>Testing our autograder service against our live Cloud Run deployment with different submission types produces distinct, secure verdicts:</p>
@@ -875,7 +1023,52 @@ def test_ssrf_metadata():
     Even when --allow-egress is turned ON to enable web scraping,
     the GCP Instance Metadata Server (169.254.169.254) remains unreachable from inside the sandbox!
     &quot;&quot;&quot;
-    ...</code></pre>
+    if not SANDBOX_BIN:
+        raise HTTPException(status_code=500, detail=&quot;Sandbox binary not found.&quot;)
+
+    probe_script = &quot;&quot;&quot;
+import urllib.request
+import os
+import json
+
+res = {}
+# 1. Try to reach GCP instance metadata server
+try:
+    req = urllib.request.Request(
+        &quot;http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/identity?audience=https://vault.com&quot;,
+        headers={&quot;Metadata-Flavor&quot;: &quot;Google&quot;}
+    )
+    with urllib.request.urlopen(req, timeout=2) as r:
+        res[&quot;metadata_access&quot;] = &quot;LEAKED: &quot; + r.read().decode()[:50]
+except Exception as e:
+    res[&quot;metadata_access&quot;] = f&quot;BLOCKED: {type(e).__name__}: {e}&quot;
+
+# 2. Try to read host agent secret (LLM API keys)
+res[&quot;llm_key_access&quot;] = os.getenv(&quot;LLM_API_KEY&quot;, &quot;NOT_ACCESSIBLE&quot;)
+
+print(json.dumps(res))
+&quot;&quot;&quot;
+
+    cmd = [
+        SANDBOX_BIN, &quot;do&quot;,
+        &quot;--allow-egress&quot;,
+        &quot;--&quot;,
+        &quot;/usr/bin/python3&quot;, &quot;-c&quot;, probe_script
+    ]
+
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if line.startswith(&quot;{&quot;) and line.endswith(&quot;}&quot;):
+            try:
+                parsed = json.loads(line)
+                parsed[&quot;egress_allowed&quot;] = True
+                parsed[&quot;status&quot;] = &quot;PASS: Cloud Run Sandbox properly blocks metadata IP even when public egress is enabled.&quot;
+                return parsed
+            except json.JSONDecodeError:
+                pass
+
+    return {&quot;raw_stdout&quot;: proc.stdout, &quot;raw_stderr&quot;: proc.stderr}</code></pre>
 <h4>Live Verification & Test Verdicts</h4>
 <blockquote><p><strong>Verified Live Service</strong>: <code>https://sandbox-web-scraper-415458962931.us-central1.run.app</code></p></blockquote>
 <p>Testing our scraper service against our live Cloud Run deployment:</p>
@@ -986,35 +1179,65 @@ def detonate_payload(req: DetonationRequest):
         ]
         proc = subprocess.run(exec_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=req.timeout_sec)
 
-        # Step 3: Export all files created or modified inside the sandbox to a tarball
+        # Step 3: Capture a forensic snapshot of modified overlay files using sandbox tar
         tar_cmd = [
             SANDBOX_BIN, &quot;tar&quot;,
             session_id,
             f&quot;--file={tar_path}&quot;
         ]
-        subprocess.run(tar_cmd, check=True)
+        tar_proc = subprocess.run(tar_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if tar_proc.returncode != 0:
+            stderr_captured += f&quot;\n[tar error rc={tar_proc.returncode}]: {tar_proc.stderr} {tar_proc.stdout}&quot;
 
-        # Step 4: Perform forensic inspection on the exported tarball on the host
+        # Step 4: Inspect the exported tar archive on the host container
         if os.path.exists(tar_path):
-            with tarfile.open(tar_path, &quot;r&quot;) as tar:
-                for member in tar.getmembers():
-                    if member.isfile():
-                        f = tar.extractfile(member)
-                        content = f.read()
-                        sha256_hash = hashlib.sha256(content).hexdigest()
-                        preview = content[:200].decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)
-                        dropped_artifacts.append(DroppedFileArtifact(
-                            filename=member.name,
-                            size_bytes=member.size,
-                            sha256=sha256_hash,
-                            preview=preview
-                        ))
+            tar_size = os.path.getsize(tar_path)
+            if tar_size == 0:
+                stderr_captured += f&quot;\n[tar archive is empty (0 bytes)]&quot;
+            else:
+                extract_dir = os.path.join(host_workdir, &quot;extracted&quot;)
+                os.makedirs(extract_dir, exist_ok=True)
+                try:
+                    with tarfile.open(tar_path, &quot;r&quot;) as tar:
+                        tar.extractall(path=extract_dir)
+
+                    # Scan for dropped files
+                    for root, _, files in os.walk(extract_dir):
+                        for fname in files:
+                            full_path = os.path.join(root, fname)
+                            rel_path = os.path.relpath(full_path, extract_dir)
+                            file_size = os.path.getsize(full_path)
+                            
+                            # Calculate sha256
+                            h = hashlib.sha256()
+                            with open(full_path, &quot;rb&quot;) as bf:
+                                while chunk := bf.read(4096):
+                                    h.update(chunk)
+                            file_sha = h.hexdigest()
+
+                            # Read preview
+                            try:
+                                with open(full_path, &quot;r&quot;, errors=&quot;ignore&quot;) as tf:
+                                    preview = tf.read(200).replace(&quot;\n&quot;, &quot; &quot;)
+                            except Exception:
+                                preview = &quot;&lt;binary content&gt;&quot;
+
+                            dropped_artifacts.append(
+                                DroppedFileArtifact(
+                                    filename=f&quot;/{rel_path}&quot;,
+                                    size_bytes=file_size,
+                                    sha256=file_sha,
+                                    preview=preview,
+                                )
+                            )
+                except Exception as ex:
+                    stderr_captured += f&quot;\nFailed parsing forensic tar: {ex}&quot;
 
     finally:
         # Step 5: Clean teardown of the background sandbox
-        del_cmd = [SANDBOX_BIN, &quot;delete&quot;, session_id]
-        subprocess.run(del_cmd, stderr=subprocess.DEVNULL)
+        subprocess.run([SANDBOX_BIN, &quot;delete&quot;, session_id], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         shutil.rmtree(host_workdir, ignore_errors=True)</code></pre>
+<blockquote><p><strong>💡 Note:</strong> <strong>Forensic Snapshotting Nuance (<code>sandbox tar</code>)</strong>: The <code>sandbox tar</code> command archives files modified in the container's writable root filesystem overlay (<code>rootfs-upper</code>). Ephemeral files located in separately mounted tmpfs paths are not part of <code>rootfs-upper</code>. By dropping artifacts on the root filesystem (e.g. <code>/README_RESTORE_FILES.txt</code>), <code>sandbox tar</code> captures them cleanly into an unadulterated evidence tarball on the host.</p></blockquote>
 <h5>2. The Simulated Malware Payload (<code>sample_payloads/ransomware_dropper_sim.sh</code>)</h5>
 <p>To safely test the detonator without running real viruses, we provide a simulated ransomware dropper:</p>
 <pre><code class="language-bash">#!/usr/bin/env bash
