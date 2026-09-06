@@ -1,26 +1,29 @@
 # Google Cloud Run Sandboxes: Hands-On Guide & End-to-End Examples
 
-This repository contains a comprehensive guide and four production-grade reference implementations for **Google Cloud Run Sandboxes** (Public Preview).
+This repository contains the complete reference implementations, test suites, Dockerfiles, and deployment manifests for the hands-on guide published on the **Google Cloud Publication on Medium**:
+
+👉 **[Safely Running Untrusted Code: A Hands-on Guide to Google Cloud Run Sandboxes](https://medium.com/google-cloud/safely-running-untrusted-code-a-hands-on-guide-to-google-cloud-run-sandboxes-8bbc95d391c7)**
 
 Cloud Run Sandboxes provide native, sub-second, micro-isolated execution boundaries directly inside your second-generation Cloud Run container instances.
 
 ---
 
-## 📖 Complete Tutorial
+## 📖 Hands-On Guide & Architecture Breakdown
 
-The complete, publication-grade tutorial is available in **[`TUTORIAL.md`](TUTORIAL.md)**.
+Read the full tutorial on Google Cloud Medium:  
+🔗 **[Safely Running Untrusted Code: A Hands-on Guide to Google Cloud Run Sandboxes](https://medium.com/google-cloud/safely-running-untrusted-code-a-hands-on-guide-to-google-cloud-run-sandboxes-8bbc95d391c7)**
 
-It covers:
-1. **Introduction**: The shift to AI execution planes and in-instance sandboxing.
-2. **Why Cloud Run Sandboxes?**: The security triad (credential isolation, deny-by-default egress, read-only root with tmpfs overlay).
-3. **Step-by-Step Guide**: Configuring `gcloud beta run deploy --sandbox-launcher` and using `/usr/local/gcp/bin/sandbox`.
-4. **101 Example**: Minimal safe code runner microservice.
-5. **3 End-to-End Real-World Use Cases**:
-   - Educational Autograder & Competitive Programming Judge
-   - AI-Assisted Autonomous Web Scraper & Research Agent
-   - SecOps Incident Response & Malware Payload Detonator
-6. **Best Practices & Operational Checklist**: Resource sizing, timeouts, and daemon modes.
-7. **References & Further Reading**: Links and attributions to the foundational blog posts and documentation.
+### Key Topics Covered in the Article:
+1. **The Evolution of Compute Isolation**: From bare metal to in-container gVisor sandboxes.
+2. **Why Cloud Run Sandboxes?**: The Zero-Trust Security Triad (credential isolation, deny-by-default egress, ephemeral root filesystem with tmpfs overlay).
+3. **CLI Mechanics & Execution Modes**: One-shot (`sandbox do`) vs. stateful background daemons (`sandbox run` / `sandbox exec`).
+4. **Filesystem & Storage Topologies**: tmpfs overlays, dual bind mounts, and `sandbox tar` forensic snapshots.
+5. **A 101 Safe Code Execution Service**: FastAPI runner demonstrating dynamic binary detection, Pydantic input validation, and self-auditing security probes.
+6. **Three Production Use Cases**:
+   - **Educational Autograder & Competitive Programming Judge**: Dual read-only mounts, test-tampering defense, DoS loop termination.
+   - **Autonomous Web Scraper & Research Agent**: Controlled egress (`--allow-egress`), metadata server (`169.254.169.254`) SSRF blocking, BeautifulSoup DOM parsing.
+   - **SecOps Incident Response & Malware Detonator**: Detached daemon execution, forensic artifact export via `sandbox tar`, SHA-256 analysis.
+7. **Production Best Practices & Checklist**: Resource sizing, cold-start amortization, and health checks.
 
 ---
 
@@ -28,8 +31,9 @@ It covers:
 
 ```text
 cloud-run-sandboxes/
-├── TUTORIAL.md                          # Full comprehensive tutorial with Mermaid diagrams
-├── README.md                            # Repository index & quickstart instructions
+├── README.md                            # Repository index, architecture & quickstart instructions
+├── assets/                              # Architecture diagrams and visual artifacts
+│   └── diagrams/
 └── examples/
     ├── 01-hello-sandbox-101/            # 101 Getting Started code execution service
     │   ├── main.py                      # FastAPI code runner + security probe endpoints
