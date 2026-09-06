@@ -490,13 +490,13 @@ sequenceDiagram
     actor Student as Student
     participant API as Autograder Service
     participant Disk as Temp Folder
-    participant Box as Sandbox
+    participant Runner as Sandbox Runner
 
     Student->>API: Submits solution code
     API->>Disk: Saves code to a temporary folder
-    API->>Box: Runs sandbox with read-only test suite
-    Note over Box: Tests run without network access
-    Box-->>API: Returns test results (JSON)
+    API->>Runner: Runs sandbox with read-only test suite
+    Note over Runner: Tests run without network access
+    Runner-->>API: Returns test results (JSON)
     API->>Disk: Cleans up temporary folder
     API-->>Student: Returns grade and feedback
 ```
@@ -535,11 +535,11 @@ flowchart TD
     User["User or AI Agent"] -->|Requests URL to scrape| Service["Scraper Service<br/>(Holds Gemini / OpenAI API Keys)"]
     Service -->|Launches sandbox with --allow-egress| Sandbox["Isolated Scraper Sandbox"]
     Sandbox -->|Fetches target webpage| TargetSite["External Website"]
-    TargetSite -->>|Returns HTML| Sandbox
+    TargetSite -->|Returns HTML| Sandbox
     Sandbox -.->|BLOCKED: Cannot touch Google metadata| Meta["Metadata Server (169.254.169.254)"]
     Sandbox -.->|BLOCKED: Cannot see host API keys| Service
-    Sandbox -->>|Returns clean text / JSON| Service
-    Service -->>|Returns safe results| User
+    Sandbox -->|Returns clean text / JSON| Service
+    Service -->|Returns safe results| User
 ```
 
 #### The Problem
@@ -567,14 +567,14 @@ sequenceDiagram
     autonumber
     actor Analyst as Security Analyst
     participant Host as Detonator App
-    participant Box as Background Sandbox
+    participant Detonator as Background Sandbox
 
     Analyst->>Host: Submits suspicious script
-    Host->>Box: Starts background sandbox with writable overlay
-    Host->>Box: Runs suspicious script inside sandbox
-    Note over Box: Script drops files, but network callbacks are blocked
-    Host->>Box: Captures all new/modified files into a tarball
-    Host->>Box: Deletes sandbox
+    Host->>Detonator: Starts background sandbox with writable overlay
+    Host->>Detonator: Runs suspicious script inside sandbox
+    Note over Detonator: Script drops files, but network callbacks are blocked
+    Host->>Detonator: Captures all new/modified files into a tarball
+    Host->>Detonator: Deletes sandbox
     Note over Host: Scans tarball for hashes and dropped files
     Host-->>Analyst: Returns incident report with file artifacts
 ```
