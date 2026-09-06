@@ -223,46 +223,6 @@
 <h1>Getting Started with Google Cloud Run Sandboxes</h1>
 <h3>A Hands-On Guide to Safely Running Untrusted Code and AI Agent Workloads</h3>
 <hr>
-<h2>Table of Contents</h2>
-<ol>
-<li><a href="#1-introduction">Introduction</a></li>
-<li><a href="#2-why-do-we-need-sandboxes">Why Do We Need Sandboxes?</a></li>
-</ol>
-<ul>
-<li><a href="#why-eval-and-subprocesses-are-dangerous">Why <code>eval()</code> and Subprocesses Are Dangerous</a></li>
-<li><a href="#the-three-security-boundaries-the-zero-trust-model">The Three Security Boundaries (The Zero-Trust Model)</a></li>
-<li><a href="#how-it-compares-to-traditional-vms">How It Compares to Traditional VMs</a></li>
-</ul>
-<ol>
-<li><a href="#3-step-by-step-getting-started">Step-by-Step: Getting Started</a></li>
-</ol>
-<ul>
-<li><a href="#prerequisites">Prerequisites</a></li>
-<li><a href="#enabling-sandboxes-on-cloud-run">Enabling Sandboxes on Cloud Run</a></li>
-<li><a href="#how-the-sandbox-cli-works">How the <code>sandbox</code> CLI Works</a></li>
-<li><a href="#execution-modes-and-storage-options">Execution Modes and Storage Options</a></li>
-</ul>
-<ol>
-<li><a href="#4-a-101-example-a-safe-code-execution-service">A 101 Example: A Safe Code Execution Service</a></li>
-</ol>
-<ul>
-<li><a href="#the-code-walkthrough">The Code Walkthrough</a></li>
-<li><a href="#deploying-to-cloud-run">Deploying to Cloud Run</a></li>
-<li><a href="#testing-the-security-boundaries-live">Testing the Security Boundaries Live</a></li>
-</ul>
-<ol>
-<li><a href="#5-three-real-world-use-cases">Three Real-World Use Cases</a></li>
-</ol>
-<ul>
-<li><a href="#use-case-1-automated-coding-assignment-judge-autograder">Use Case 1: Automated Coding Assignment Judge (Autograder)</a></li>
-<li><a href="#use-case-2-ai-web-research-scraper-with-ssrf-defense">Use Case 2: AI Web Research Scraper (With SSRF Defense)</a></li>
-<li><a href="#use-case-3-secops-malware--script-detonation-sandbox">Use Case 3: SecOps Malware & Script Detonation Sandbox</a></li>
-</ul>
-<ol>
-<li><a href="#6-best-practices-and-gotchas">Best Practices and Gotchas</a></li>
-<li><a href="#7-references--further-reading">References & Further Reading</a></li>
-</ol>
-<hr>
 <h2>1. Introduction</h2>
 <p>If you have built an AI agent, an automated coding platform, or a SaaS product where users can write custom automation scripts, you have probably run into this question:</p>
 <blockquote><p><strong>How do I safely execute code that I didn't write?</strong></p></blockquote>
@@ -280,6 +240,18 @@
   <img src="https://raw.githubusercontent.com/rominirani/cloud-run-sandboxes/main/assets/diagrams/diagram_1_evolution.png" alt="The Evolution of Compute Isolation: From Bare Metal to In-Container Sandboxes">
   <figcaption>The Evolution of Compute Isolation: From Bare Metal to In-Container Sandboxes</figcaption>
 </figure>
+<hr>
+<h3>What We’ll Cover</h3>
+<ul>
+<li><strong>The Hidden Security Trap</strong>: Why executing AI-generated or user-submitted code with <code>eval()</code> exposes your database secrets and Google Cloud credentials.</li>
+<li><strong>The Zero-Trust Sandbox Model</strong>: How Cloud Run Sandboxes isolate untrusted processes, block metadata server access, and deny outbound network traffic by default.</li>
+<li><strong>Step-by-Step 101 Walkthrough</strong>: Deploying your first sandbox-enabled Cloud Run service in under 5 minutes (including verified live tests).</li>
+<li><strong>3 Production-Grade Use Cases (Built from Scratch)</strong>:</li>
+<li>🎓 <strong>Educational Autograder</strong>: Running student code against hidden test suites using read-only bind mounts.</li>
+<li>🌐 <strong>AI Research Web Scraper</strong>: Enabling controlled egress (<code>--allow-egress</code>) while staying immune to metadata SSRF attacks.</li>
+<li>🛡️ <strong>SecOps Malware Detonator</strong>: Using background detached sandboxes and tarball snapshots to safely inspect suspicious scripts.</li>
+<li><strong>Production Best Practices</strong>: Crucial gotchas around memory sizing, timeouts, and daemon modes.</li>
+</ul>
 <hr>
 <h2>2. Why Do We Need Sandboxes?</h2>
 <h3>Why <code>eval()</code> and Subprocesses Are Dangerous</h3>

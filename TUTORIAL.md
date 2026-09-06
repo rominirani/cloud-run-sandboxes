@@ -3,30 +3,6 @@
 
 ---
 
-## Table of Contents
-1. [Introduction](#1-introduction)
-2. [Why Do We Need Sandboxes?](#2-why-do-we-need-sandboxes)
-   - [Why `eval()` and Subprocesses Are Dangerous](#why-eval-and-subprocesses-are-dangerous)
-   - [The Three Security Boundaries (The Zero-Trust Model)](#the-three-security-boundaries-the-zero-trust-model)
-   - [How It Compares to Traditional VMs](#how-it-compares-to-traditional-vms)
-3. [Step-by-Step: Getting Started](#3-step-by-step-getting-started)
-   - [Prerequisites](#prerequisites)
-   - [Enabling Sandboxes on Cloud Run](#enabling-sandboxes-on-cloud-run)
-   - [How the `sandbox` CLI Works](#how-the-sandbox-cli-works)
-   - [Execution Modes and Storage Options](#execution-modes-and-storage-options)
-4. [A 101 Example: A Safe Code Execution Service](#4-a-101-example-a-safe-code-execution-service)
-   - [The Code Walkthrough](#the-code-walkthrough)
-   - [Deploying to Cloud Run](#deploying-to-cloud-run)
-   - [Testing the Security Boundaries Live](#testing-the-security-boundaries-live)
-5. [Three Real-World Use Cases](#5-three-real-world-use-cases)
-   - [Use Case 1: Automated Coding Assignment Judge (Autograder)](#use-case-1-automated-coding-assignment-judge-autograder)
-   - [Use Case 2: AI Web Research Scraper (With SSRF Defense)](#use-case-2-ai-web-research-scraper-with-ssrf-defense)
-   - [Use Case 3: SecOps Malware & Script Detonation Sandbox](#use-case-3-secops-malware--script-detonation-sandbox)
-6. [Best Practices and Gotchas](#6-best-practices-and-gotchas)
-7. [References & Further Reading](#7-references--further-reading)
-
----
-
 ## 1. Introduction
 
 If you have built an AI agent, an automated coding platform, or a SaaS product where users can write custom automation scripts, you have probably run into this question:
@@ -51,6 +27,18 @@ flowchart LR
     B --> C["Containers<br/>Seconds to start"]
     C --> D["Cloud Run Sandboxes<br/>Milliseconds to launch"]
 ```
+
+---
+
+### What We’ll Cover
+- **The Hidden Security Trap**: Why executing AI-generated or user-submitted code with `eval()` exposes your database secrets and Google Cloud credentials.
+- **The Zero-Trust Sandbox Model**: How Cloud Run Sandboxes isolate untrusted processes, block metadata server access, and deny outbound network traffic by default.
+- **Step-by-Step 101 Walkthrough**: Deploying your first sandbox-enabled Cloud Run service in under 5 minutes (including verified live tests).
+- **3 Production-Grade Use Cases (Built from Scratch)**:
+  - 🎓 **Educational Autograder**: Running student code against hidden test suites using read-only bind mounts.
+  - 🌐 **AI Research Web Scraper**: Enabling controlled egress (`--allow-egress`) while staying immune to metadata SSRF attacks.
+  - 🛡️ **SecOps Malware Detonator**: Using background detached sandboxes and tarball snapshots to safely inspect suspicious scripts.
+- **Production Best Practices**: Crucial gotchas around memory sizing, timeouts, and daemon modes.
 
 ---
 
