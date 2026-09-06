@@ -449,6 +449,30 @@ def test_fs_isolation():
     return run_code(ExecutionRequest(language="bash", code=probe, allow_write=False))
 ```
 
+#### Key Architecture & Implementation Details in `main.py`
+
+##### 1. Dynamic Sandbox Binary Detection (`SANDBOX_BIN`)
+When deploying to Cloud Run with `--sandbox-launcher`, Google's platform injects the sandbox supervisor binary into your container at `/usr/local/gcp/bin/sandbox`. By verifying existence with `os.path.exists()` and falling back to `shutil.which("sandbox")`, the service detects whether it is executing inside a sandbox-enabled Cloud Run container or a local environment. If the binary is missing, it returns a descriptive error message rather than crashing with an unhandled OS `FileNotFoundError`.
+
+##### 2. Strict Request Validation with Pydantic (`ExecutionRequest`)
+* **`language: Literal["python", "bash"]`**: Restricts execution strictly to supported runtimes, preventing callers from passing arbitrary or malicious system executables.
+* **`timeout_sec: int = Field(default=10, ge=1, le=60)`**: Enforces hard minimums (1s) and maximums (60s) directly at the HTTP API layer, preventing resource-exhaustion attacks or runaway scripts (`while True: pass`).
+* **`allow_write` and `allow_egress`**: Both default to `False`, enforcing the **Principle of Least Privilege** (deny-by-default) unless the caller explicitly opts in.
+
+##### 3. Safe Command Construction & the `--` Separator
+The CLI command is assembled as: `[SANDBOX_BIN, "do", ...flags..., "--", ...interpreter...]`. The double dash (`--`) is essential: it instructs the `sandbox` utility that launcher configuration flags (such as `--write` or `--allow-egress`) have ended, and all subsequent tokens belong to the target command. This prevents arguments inside user code from colliding with CLI options.
+
+##### 4. Execution & Timeout Handling via `subprocess.run`
+* **Independent Output Capture**: Captures `stdout` and `stderr` independently using `capture_output=True, text=True` without mixing streams or leaking untrusted output to the host console.
+* **Clean Process Killing**: Wraps execution in a `try...except subprocess.TimeoutExpired` block. If the untrusted code hangs or exceeds the requested timeout, the process is terminated cleanly and returns exit code `124` (the standard POSIX timeout exit code) with zero lingering host processes.
+
+##### 5. Self-Auditing Security Probe Endpoints
+* **`/test/env-isolation`**: Injects `HOST_SUPER_SECRET` into the host environment, then executes an internal probe to prove the sandbox cannot read host credentials.
+* **`/test/metadata-isolation`**: Attempts to query `http://169.254.169.254` (GCP metadata server) to verify that token harvesting is blocked.
+* **`/test/fs-isolation`**: Attempts to write to `/test_probe.txt` on the root filesystem to prove that the root filesystem is strictly read-only.
+
+---
+
 #### `Dockerfile`
 ```dockerfile
 FROM python:3.11-slim
@@ -471,6 +495,22 @@ ENV PORT=8080
 EXPOSE 8080
 CMD ["python3", "main.py"]
 ```
+
+#### Key Implementation Details in `Dockerfile`
+
+##### 1. Lightweight Base Image (`python:3.11-slim`)
+Uses the official minimal Debian slim image, keeping image size small and eliminating unnecessary compilers or build tools from the container surface.
+
+##### 2. Essential Utilities Only
+Installs only `curl` (for testing network probes), `ca-certificates` (for TLS verification), and `bash`. Cleans `/var/lib/apt/lists/*` within the same layer to keep the image lean and minimize pull times during Cloud Run instance autoscaling.
+
+##### 3. Canonical Symlink for Python (`RUN ln -sf $(which python3) /usr/bin/python3`)
+In containerized Python environments, the binary may reside in custom virtualenv paths or `/usr/local/bin/python3`. Because the isolated sandbox launches with a minimal default `PATH`, creating a symlink at `/usr/bin/python3` guarantees that calls to `/usr/bin/python3` inside the sandbox resolve reliably every single time.
+
+##### 4. Standard Container Contract (`PORT=8080`, `EXPOSE 8080`)
+Satisfies Cloud Run container requirements by exposing and listening on the dynamic `PORT` environment variable.
+
+---
 
 ### Deploying to Cloud Run
 

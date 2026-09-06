@@ -106,6 +106,15 @@
       margin-bottom: 8px;
     }
 
+    h5 {
+      font-family: var(--font-sans);
+      font-size: 17px;
+      font-weight: 600;
+      margin-top: 22px;
+      margin-bottom: 6px;
+      color: #242424;
+    }
+
     p {
       margin-top: 0;
       margin-bottom: 24px;
@@ -521,6 +530,29 @@ def test_fs_isolation():
     &quot;&quot;&quot;Verify that writing to the root filesystem fails without --write.&quot;&quot;&quot;
     probe = &quot;echo &#x27;malicious write&#x27; &gt; /test_probe.txt&quot;
     return run_code(ExecutionRequest(language=&quot;bash&quot;, code=probe, allow_write=False))</code></pre>
+<h4>Key Architecture & Implementation Details in <code>main.py</code></h4>
+<h5>1. Dynamic Sandbox Binary Detection (<code>SANDBOX_BIN</code>)</h5>
+<p>When deploying to Cloud Run with <code>--sandbox-launcher</code>, Google's platform injects the sandbox supervisor binary into your container at <code>/usr/local/gcp/bin/sandbox</code>. By verifying existence with <code>os.path.exists()</code> and falling back to <code>shutil.which("sandbox")</code>, the service detects whether it is executing inside a sandbox-enabled Cloud Run container or a local environment. If the binary is missing, it returns a descriptive error message rather than crashing with an unhandled OS <code>FileNotFoundError</code>.</p>
+<h5>2. Strict Request Validation with Pydantic (<code>ExecutionRequest</code>)</h5>
+<ul>
+<li><strong><code>language: Literal["python", "bash"]</code></strong>: Restricts execution strictly to supported runtimes, preventing callers from passing arbitrary or malicious system executables.</li>
+<li><strong><code>timeout_sec: int = Field(default=10, ge=1, le=60)</code></strong>: Enforces hard minimums (1s) and maximums (60s) directly at the HTTP API layer, preventing resource-exhaustion attacks or runaway scripts (<code>while True: pass</code>).</li>
+<li><strong><code>allow_write</code> and <code>allow_egress</code></strong>: Both default to <code>False</code>, enforcing the <strong>Principle of Least Privilege</strong> (deny-by-default) unless the caller explicitly opts in.</li>
+</ul>
+<h5>3. Safe Command Construction & the <code>--</code> Separator</h5>
+<p>The CLI command is assembled as: <code>[SANDBOX_BIN, "do", ...flags..., "--", ...interpreter...]</code>. The double dash (<code>--</code>) is essential: it instructs the <code>sandbox</code> utility that launcher configuration flags (such as <code>--write</code> or <code>--allow-egress</code>) have ended, and all subsequent tokens belong to the target command. This prevents arguments inside user code from colliding with CLI options.</p>
+<h5>4. Execution & Timeout Handling via <code>subprocess.run</code></h5>
+<ul>
+<li><strong>Independent Output Capture</strong>: Captures <code>stdout</code> and <code>stderr</code> independently using <code>capture_output=True, text=True</code> without mixing streams or leaking untrusted output to the host console.</li>
+<li><strong>Clean Process Killing</strong>: Wraps execution in a <code>try...except subprocess.TimeoutExpired</code> block. If the untrusted code hangs or exceeds the requested timeout, the process is terminated cleanly and returns exit code <code>124</code> (the standard POSIX timeout exit code) with zero lingering host processes.</li>
+</ul>
+<h5>5. Self-Auditing Security Probe Endpoints</h5>
+<ul>
+<li><strong><code>/test/env-isolation</code></strong>: Injects <code>HOST_SUPER_SECRET</code> into the host environment, then executes an internal probe to prove the sandbox cannot read host credentials.</li>
+<li><strong><code>/test/metadata-isolation</code></strong>: Attempts to query <code>http://169.254.169.254</code> (GCP metadata server) to verify that token harvesting is blocked.</li>
+<li><strong><code>/test/fs-isolation</code></strong>: Attempts to write to <code>/test_probe.txt</code> on the root filesystem to prove that the root filesystem is strictly read-only.</li>
+</ul>
+<hr>
 <h4><code>Dockerfile</code></h4>
 <pre><code class="language-dockerfile">FROM python:3.11-slim
 
@@ -541,6 +573,16 @@ COPY main.py .
 ENV PORT=8080
 EXPOSE 8080
 CMD [&quot;python3&quot;, &quot;main.py&quot;]</code></pre>
+<h4>Key Implementation Details in <code>Dockerfile</code></h4>
+<h5>1. Lightweight Base Image (<code>python:3.11-slim</code>)</h5>
+<p>Uses the official minimal Debian slim image, keeping image size small and eliminating unnecessary compilers or build tools from the container surface.</p>
+<h5>2. Essential Utilities Only</h5>
+<p>Installs only <code>curl</code> (for testing network probes), <code>ca-certificates</code> (for TLS verification), and <code>bash</code>. Cleans <code>/var/lib/apt/lists/*</code> within the same layer to keep the image lean and minimize pull times during Cloud Run instance autoscaling.</p>
+<h5>3. Canonical Symlink for Python (<code>RUN ln -sf $(which python3) /usr/bin/python3</code>)</h5>
+<p>In containerized Python environments, the binary may reside in custom virtualenv paths or <code>/usr/local/bin/python3</code>. Because the isolated sandbox launches with a minimal default <code>PATH</code>, creating a symlink at <code>/usr/bin/python3</code> guarantees that calls to <code>/usr/bin/python3</code> inside the sandbox resolve reliably every single time.</p>
+<h5>4. Standard Container Contract (<code>PORT=8080</code>, <code>EXPOSE 8080</code>)</h5>
+<p>Satisfies Cloud Run container requirements by exposing and listening on the dynamic <code>PORT</code> environment variable.</p>
+<hr>
 <h3>Deploying to Cloud Run</h3>
 <p>Deploy this service using <code>gcloud</code>:</p>
 <pre><code class="language-bash">gcloud beta run deploy sandbox-hello-101 \

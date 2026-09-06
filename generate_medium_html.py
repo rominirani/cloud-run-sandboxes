@@ -197,6 +197,9 @@ def markdown_to_medium_html(md_text):
         elif stripped.startswith("#### "):
             output.append(f"<h4>{parse_inline(stripped[5:].strip())}</h4>")
             continue
+        elif stripped.startswith("##### "):
+            output.append(f"<h5>{parse_inline(stripped[6:].strip())}</h5>")
+            continue
 
         # Regular Paragraph
         output.append(f"<p>{parse_inline(stripped)}</p>")
@@ -313,6 +316,15 @@ def markdown_to_medium_html(md_text):
       font-weight: 600;
       margin-top: 28px;
       margin-bottom: 8px;
+    }}
+
+    h5 {{
+      font-family: var(--font-sans);
+      font-size: 17px;
+      font-weight: 600;
+      margin-top: 22px;
+      margin-bottom: 6px;
+      color: #242424;
     }}
 
     p {{
