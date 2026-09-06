@@ -251,7 +251,9 @@
 <li>🌐 <strong>AI Research Web Scraper</strong>: Enabling controlled egress (<code>--allow-egress</code>) while staying immune to metadata SSRF attacks.</li>
 <li>🛡️ <strong>SecOps Malware Detonator</strong>: Using background detached sandboxes and tarball snapshots to safely inspect suspicious scripts.</li>
 <li><strong>Production Best Practices</strong>: Crucial gotchas around memory sizing, timeouts, and daemon modes.</li>
+<li><strong>Complete Source Code on GitHub</strong>: Cloneable repository with all Dockerfiles, FastAPI microservices, and deployment scripts.</li>
 </ul>
+<blockquote><p><strong>⚡ Tip:</strong> <strong>Get the Complete Code on GitHub</strong> All four reference applications, test suites, Dockerfiles, and deployment scripts featured in this tutorial are open-source and ready to clone: 📦 <strong>GitHub Repository</strong>: <a href="https://github.com/rominirani/cloud-run-sandboxes">https://github.com/rominirani/cloud-run-sandboxes</a></p></blockquote>
 <hr>
 <h2>2. Why Do We Need Sandboxes?</h2>
 <h3>Why <code>eval()</code> and Subprocesses Are Dangerous</h3>
@@ -713,7 +715,28 @@ echo &quot;Service is live at: ${SERVICE_URL}&quot;</code></pre>
 <h3>5. Always Set a Timeout</h3>
 <p>Never run untrusted code without a timeout. A simple <code>while True: pass</code> can hang your worker forever if you don't pass <code>timeout=</code> to <code>subprocess.run()</code>.</p>
 <hr>
-<h2>7. References & Further Reading</h2>
+<h2>7. Complete Code Repository on GitHub</h2>
+<p>All four complete reference applications, test suites, Dockerfiles, and one-click deployment scripts featured in this tutorial are open-source and maintained on GitHub:</p>
+<p>👉 <strong><a href="https://github.com/rominirani/cloud-run-sandboxes">https://github.com/rominirani/cloud-run-sandboxes</a></strong></p>
+<h3>What's Inside the Repository</h3>
+<ul>
+<li><strong><a href="https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/01-hello-sandbox-101"><code>examples/01-hello-sandbox-101/</code></a></strong>: The foundational FastAPI code execution runner, including live security boundary probe tests verifying credential shielding, metadata server isolation, and read-only filesystem enforcement.</li>
+<li><strong><a href="https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/02-educational-autograder"><code>examples/02-educational-autograder/</code></a></strong>: The automated coding assignment judge featuring dual read-only bind mounts, execution timeouts, and sample submissions (correct algorithm, infinite loop, and unauthorized exploit attempt).</li>
+<li><strong><a href="https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/03-autonomous-web-scraper"><code>examples/03-autonomous-web-scraper/</code></a></strong>: The AI research web scraper utilizing <code>--allow-egress</code> for public web fetching while remaining strictly immune to internal GCP metadata server SSRF attacks.</li>
+<li><strong><a href="https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/04-secops-payload-detonator"><code>examples/04-secops-payload-detonator/</code></a></strong>: The SecOps dynamic malware analysis environment demonstrating background detached sandboxes (<code>sandbox run --detach</code>), in-memory scratchpads (<code>--write</code>), and forensic workspace tarball snapshotting (<code>sandbox tar</code>).</li>
+</ul>
+<h3>Quick Start: Clone and Deploy</h3>
+<p>You can clone the repository and deploy any example directly to your Google Cloud project in minutes:</p>
+<pre><code class="language-bash"># Clone the repository
+git clone https://github.com/rominirani/cloud-run-sandboxes.git
+cd cloud-run-sandboxes
+
+# Deploy the 101 Hello Sandbox service
+cd examples/01-hello-sandbox-101
+chmod +x deploy.sh
+./deploy.sh</code></pre>
+<hr>
+<h2>8. References & Further Reading</h2>
 <p>This guide was inspired by the excellent work and research from Google Cloud engineers and developer advocates:</p>
 <ol>
 <li><strong><a href="https://cloud.google.com/blog/topics/developers-practitioners/google-cloud-run-sandboxes-are-in-public-preview">Google Cloud Run Sandboxes Are in Public Preview</a></strong> (Google Cloud Blog)</li>

@@ -39,6 +39,12 @@ flowchart LR
   - 🌐 **AI Research Web Scraper**: Enabling controlled egress (`--allow-egress`) while staying immune to metadata SSRF attacks.
   - 🛡️ **SecOps Malware Detonator**: Using background detached sandboxes and tarball snapshots to safely inspect suspicious scripts.
 - **Production Best Practices**: Crucial gotchas around memory sizing, timeouts, and daemon modes.
+- **Complete Source Code on GitHub**: Cloneable repository with all Dockerfiles, FastAPI microservices, and deployment scripts.
+
+> [!TIP]
+> **Get the Complete Code on GitHub**  
+> All four reference applications, test suites, Dockerfiles, and deployment scripts featured in this tutorial are open-source and ready to clone:  
+> 📦 **GitHub Repository**: [https://github.com/rominirani/cloud-run-sandboxes](https://github.com/rominirani/cloud-run-sandboxes)
 
 ---
 
@@ -718,7 +724,37 @@ Never run untrusted code without a timeout. A simple `while True: pass` can hang
 
 ---
 
-## 7. References & Further Reading
+## 7. Complete Code Repository on GitHub
+
+All four complete reference applications, test suites, Dockerfiles, and one-click deployment scripts featured in this tutorial are open-source and maintained on GitHub:
+
+👉 **[https://github.com/rominirani/cloud-run-sandboxes](https://github.com/rominirani/cloud-run-sandboxes)**
+
+### What's Inside the Repository
+
+* **[`examples/01-hello-sandbox-101/`](https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/01-hello-sandbox-101)**: The foundational FastAPI code execution runner, including live security boundary probe tests verifying credential shielding, metadata server isolation, and read-only filesystem enforcement.
+* **[`examples/02-educational-autograder/`](https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/02-educational-autograder)**: The automated coding assignment judge featuring dual read-only bind mounts, execution timeouts, and sample submissions (correct algorithm, infinite loop, and unauthorized exploit attempt).
+* **[`examples/03-autonomous-web-scraper/`](https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/03-autonomous-web-scraper)**: The AI research web scraper utilizing `--allow-egress` for public web fetching while remaining strictly immune to internal GCP metadata server SSRF attacks.
+* **[`examples/04-secops-payload-detonator/`](https://github.com/rominirani/cloud-run-sandboxes/tree/main/examples/04-secops-payload-detonator)**: The SecOps dynamic malware analysis environment demonstrating background detached sandboxes (`sandbox run --detach`), in-memory scratchpads (`--write`), and forensic workspace tarball snapshotting (`sandbox tar`).
+
+### Quick Start: Clone and Deploy
+
+You can clone the repository and deploy any example directly to your Google Cloud project in minutes:
+
+```bash
+# Clone the repository
+git clone https://github.com/rominirani/cloud-run-sandboxes.git
+cd cloud-run-sandboxes
+
+# Deploy the 101 Hello Sandbox service
+cd examples/01-hello-sandbox-101
+chmod +x deploy.sh
+./deploy.sh
+```
+
+---
+
+## 8. References & Further Reading
 
 This guide was inspired by the excellent work and research from Google Cloud engineers and developer advocates:
 
